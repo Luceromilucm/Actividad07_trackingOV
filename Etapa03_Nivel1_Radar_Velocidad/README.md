@@ -1,92 +1,83 @@
-# 🚦 Etapa 03 · Nivel 1 — Radar de Velocidad (cámara fija)
+# Etapa 03, Nivel 1: radar de velocidad con cámara fija
 
-**Subido por:** CENTENO MAMANI, Mirian Lucero
+Parte del proyecto integrador «Monitor Inteligente de Tráfico y Navegación».
 
-Proyecto integrador «Monitor Inteligente de Tráfico y Navegación».
+## Objetivo
 
-Aplicación de escritorio que detecta vehículos con **YOLO26**, los sigue con **ByteTrack**, calcula su velocidad en **km/h** y marca en **rojo** a los que superan el límite. Además genera estadísticas y un reporte.
+Detectar vehículos con YOLO, seguirlos con tracking 2D y calcular su velocidad en km/h a partir de una distancia real medida en Google Maps. Como reto, la caja del vehículo se muestra en rojo cuando supera el límite de velocidad.
 
-![Aplicación](capturas/app_analizando.png)
+![Aplicación en funcionamiento](capturas/app_analizando.png)
 
-## Instalación (una sola vez)
-Necesitas **Python 3.10 o superior**.
+## Método
+
+1. **Detección y seguimiento:** YOLO26 detecta autos, motos, buses y camiones (clases COCO), y ByteTrack asigna un identificador a cada vehículo.
+2. **Punto de medición:** se usa el centro inferior de la caja, es decir, el punto de contacto con la calzada. Es el único punto que está sobre el plano calibrado.
+3. **Calibración (píxel → metro):**
+   - **Homografía:** cuatro esquinas de un rectángulo real, con su ancho y largo medidos en Google Maps. Corrige la perspectiva.
+   - **Factor de escala (px/m):** dos puntos y la distancia entre ellos. Solo es exacto si la cámara mira la calle de costado.
+4. **Tiempo:** en un video se usa el reloj del propio video (frame / fps), de modo que la velocidad de procesamiento no altera la medición. En vivo se usa el reloj real.
+5. **Velocidad:** regresión lineal de la posición respecto al tiempo en una ventana de 1 s, convertida a km/h (× 3,6).
+   - En pantalla se muestra la mediana de las últimas 10 estimaciones.
+   - La velocidad registrada de cada vehículo es la mediana de todas sus estimaciones.
+6. **Filtros:** se descartan las cajas cortadas por el borde de la imagen, los saltos de más de 250 km/h (cambios de identificador) y las detecciones fuera de la zona calibrada.
+7. **Alerta visual:** la caja se muestra en verde por debajo del 90 % del límite, en naranja entre el 90 % y el límite, y en rojo con el texto «EXCESO DE VELOCIDAD» por encima del límite. La infracción se confirma con la velocidad registrada, no con un pico momentáneo.
+
+Límites de referencia en zona urbana (D.S. 025-2021-MTC): 30 km/h en calles y jirones, y 50 km/h en avenidas.
+
+## Instalación y ejecución
+
 ```bash
 pip install -r requirements.txt
+python app.py
 ```
-- **Windows:** doble clic en `iniciar.bat`, que instala todo y abre la app.
-- **Linux / Mac:** ejecuta `python app.py`.
 
-El modelo YOLO26 se descarga solo la primera vez (unos 6 MB).
+En Windows también se puede ejecutar `iniciar.bat`, que instala las dependencias y abre la aplicación. `radar_velocidad.py` es una versión por consola, sin interfaz gráfica.
 
-## Pruébalo ya con el ejemplo
-1. Abre la app → **📂 Abrir video…** → elige `ejemplo/ejemplo_trafico.mp4`.
-2. La calibración se carga sola, porque el archivo `ejemplo_trafico.calib.json` está al lado del video.
-3. En Tipo de vía elige *Avenida — 50 km/h* y pulsa **▶ Iniciar**.
+Flujo de uso:
 
-Es un video sintético con 10 vehículos a velocidades conocidas. Se usa para verificar que la medición es correcta:
+1. **Fuente:** archivo de video, webcam o cámara del celular mediante la aplicación IP Webcam (`http://<IP>:8080/video`).
+2. **Calibración:** se marcan los puntos de referencia sobre la imagen y se ingresan las distancias medidas en Google Maps. La calibración se guarda como `<video>.calib.json` y se carga automáticamente la próxima vez.
+3. **Configuración:** límite de velocidad, modelo (YOLO26n, s o m), confianza y resolución de entrada.
+4. **Análisis y exportación:** se genera un reporte HTML, un CSV de vehículos, el video anotado y las fotos de los infractores en `resultados/`.
+
+## Validación
+
+El video sintético `ejemplo/ejemplo_trafico.mp4` contiene 10 vehículos a velocidades conocidas, y su calibración se carga automáticamente.
 
 | Real (km/h) | 25 | 28 | 30 | 35 | 38 | 42 | 45 | 48 | 55 | 62 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Medido | 24,8 | 27,9 | 29,9 | 34,5 | 37,9 | 41,6 | 45,0 | 47,5 | 54,4 | 61,4 |
+| Medida (km/h) | 24,8 | 27,9 | 29,9 | 34,5 | 37,9 | 41,6 | 45,0 | 47,5 | 54,4 | 61,4 |
 
 El error es menor al 1,5 % en todos los casos.
 
-## Uso con tu propio video (paso a paso)
-| Paso | Qué haces |
+## Resultados con video real
+
+Video de una cámara pública fija sobre el puente Moravní most (Uherské Hradiště, República Checa), grabado de noche. Zona calibrada de 13,4 m × 75,5 m, con una escala de 8,3 a 27,2 px/m.
+
+| Indicador | Valor |
 |---|---|
-| **① Fuente** | Abre un video, usa la webcam o el celular (app *IP Webcam* → URL `http://IP:8080/video`) |
-| **② Calibración** | Pulsa **Calibrar sobre la imagen** y haz clic sobre las referencias. Luego escribe las distancias medidas en Google Maps |
-| **③ Configuración** | Tipo de vía / límite, modelo (rápido, balanceado o preciso), confianza y **resolución** (640 / 960 / 1280: más alta detecta autos lejanos o de noche, pero es más lenta) |
-| **④ Análisis** | ▶ Iniciar · ⏸ Pausa · ⏹ Detener. El límite se puede cambiar en pleno análisis |
-| **⑤ Resultados** | 📄 Exportar reporte (HTML + CSV + fotos) · 📁 Abrir carpeta |
+| Vehículos medidos | 14 (11 autos y 3 camiones) |
+| Velocidad mediana / P85 | 37,3 km/h / 47,9 km/h |
+| Rango de velocidades | 24,2 a 58,2 km/h |
+| Infracciones (límite de 46 km/h) | 5 de 14 (35,7 %) |
 
-La pestaña **❓ Ayuda** de la app explica todo esto en detalle.
+La salida completa de esta corrida está en `resultados/puente_uherske_20261120/`.
 
-### ¿Qué video sirve?
-- Cámara **fija** (sin movimiento ni zoom), grabado desde un lugar **alto**.
-- Un tramo de calle **recto**, de día y con 15–20 m visibles.
-- Referencias en el piso que puedas medir en Google Maps: paso peatonal, postes, bordes de la calzada.
-- Ubicación conocida, para poder medirla.
+## Estructura
 
-### Calibración con Google Maps
-Busca la calle en vista satélite → **clic derecho → Medir distancia**.
-- **Homografía (recomendado):** 4 esquinas de un rectángulo real, en el orden sup-izq → sup-der → inf-der → inf-izq, más su ancho y largo. Corrige la perspectiva, así que funciona con la cámara en diagonal.
-- **Escala px/m:** 2 puntos y su distancia (es lo que pide el enunciado). Solo es exacta si la cámara mira la calle de costado.
-
-La calibración se guarda como `<video>.calib.json` y se carga sola la próxima vez que abras ese video.
-
-## Qué muestra la app
-- **Video en vivo:** caja 🟢 bajo el límite, 🟠 por encima del 90 % del límite, 🔴 **sobre el límite**, con el texto "EXCESO DE VELOCIDAD" parpadeando. Incluye un minimapa con la vista cenital.
-- **Indicadores:** vehículos medidos, velocidad promedio y mediana, **P85** (el estándar en ingeniería de tránsito), velocidad máxima, infracciones (número y %), y flujo en vehículos por minuto.
-- **📊 Gráficos:** histograma con la línea del límite, velocidad de cada vehículo en el tiempo y resumen por tipo (auto, moto, bus, camión).
-- **🚗 Vehículos:** tabla ordenable con ID, tipo, velocidad, sentido (↑↓←→), tiempo y estado, más un filtro "solo infracciones".
-- **🚨 Infracciones:** galería con la foto de cada infractor (doble clic para ampliar).
-- **📄 Reporte:** en `resultados/<fecha>_<video>/` quedan `reporte.html`, `vehiculos.csv`, `video_anotado.mp4`, `captura.jpg` y la carpeta `infracciones/`.
-
-## Cómo se calcula la velocidad
-1. **Detección:** YOLO26 (clases COCO auto, moto, bus y camión). **Tracking:** ByteTrack asigna un ID por vehículo.
-2. **Punto de medición:** el centro inferior de la caja, donde la llanta toca el piso, que es el único punto realmente sobre la pista.
-3. **Píxel → metro:** con la homografía (vista cenital) o con el factor de escala.
-4. **Tiempo:** en un video se usa el reloj del propio video (frame / fps), así una PC lenta no altera el resultado. En vivo se usa el reloj real.
-5. **Velocidad:** regresión lineal de la posición contra el tiempo en una ventana de 1 s. La que se muestra es la mediana de las últimas 10 estimaciones. La **registrada** es la mediana de todas las estimaciones del vehículo.
-6. **Filtros:** se descartan las cajas cortadas por el borde de la imagen, los saltos de más de 250 km/h (cambio de ID) y lo que está fuera de la zona calibrada. La clase se decide por voto mayoritario.
-7. **Infracción:** se confirma con la velocidad registrada, no con un pico momentáneo. Si al final no superó el límite, la foto se descarta.
-
-Límites urbanos en Perú (D.S. 025-2021-MTC): **30 km/h** en calles y jirones, **50 km/h** en avenidas.
-
-## Archivos
-| Archivo | Para qué |
+| Archivo o carpeta | Descripción |
 |---|---|
-| `app.py` | Aplicación gráfica (PySide6 + pyqtgraph) |
-| `motor.py` | Núcleo: calibración, tracking y estimación de velocidad |
-| `radar_velocidad.py` | Versión por consola (opcional) |
-| `iniciar.bat` | Lanzador para Windows |
-| `ejemplo/` | Video de prueba ya calibrado |
-| `videos/` | Calibraciones `.calib.json` de los videos reales (Cabra Road, Dublín, y puente Moravní most, Uherské Hradiště). Los `.mp4` no se suben por su tamaño (de 37 a 48 MB): copia el video aquí con el mismo nombre y la calibración se carga sola |
-| `resultados/puente_uherske_20261120/` | Corrida del informe (límite 46 km/h): `reporte.html`, `vehiculos.csv`, `captura.jpg` y fotos de los infractores |
-| `capturas/`, `guia_calibracion*.jpg` | Capturas de la app y guía de los puntos de calibración |
+| `app.py` | Interfaz gráfica (PySide6 + pyqtgraph) |
+| `motor.py` | Núcleo: calibración, seguimiento y estimación de velocidad |
+| `radar_velocidad.py` | Versión por consola |
+| `ejemplo/` | Video sintético de validación, su calibración y el resultado anotado |
+| `videos/` | Calibraciones (`.calib.json`) de los videos reales. Los videos no se incluyen por su tamaño |
+| `resultados/` | Resultados de la corrida presentada en el informe |
+| `capturas/`, `guia_calibracion*.jpg` | Capturas de la aplicación y guía de los puntos de calibración |
 
 ## Limitaciones
-- Se asume que la pista es plana.
-- De noche, con lluvia o con autos muy tapados entre sí, baja la detección.
-- Los autos lejanos ocupan pocos píxeles. Usa `Preciso (YOLO26m)` o acerca la zona de calibración.
+
+- Se asume que la calzada es plana.
+- La detección empeora de noche, con lluvia y cuando los vehículos se ocultan entre sí.
+- Los vehículos lejanos ocupan pocos píxeles, por lo que su medición es menos precisa.
+- La cámara no debe moverse después de la calibración. Para cámara en movimiento, véase el Nivel 3.

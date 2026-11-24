@@ -1,49 +1,62 @@
-# Etapa 02 · Ítem d — Tracking 2D con cámara en movimiento compensado con odometría visual
+# Etapa 02, ítem d: tracking 2D con cámara en movimiento mediante odometría visual
 
-**Subido por:** CENTENO MAMANI, Mirian Lucero
+## Planteamiento
 
-> *«Si la cámara estuviera en movimiento y se necesitaría realizar una tarea de tracking, la implementación del ítem b no funcionará. Encuentre la solución en función a la odometría visual.»*
+> «Si la cámara estuviera en movimiento y se necesitaría realizar una tarea de tracking, la implementación del ítem b no funcionará. Encuentre la solución en función a la odometría visual.»
 
-## Problema
-Con la cámara en movimiento, el desplazamiento que se ve en la imagen es la suma de dos movimientos:
+El tracker del ítem b mide todas las magnitudes en coordenadas de la imagen. Con la cámara en movimiento, el desplazamiento observado de un objeto es:
 
 ```
-Δp_observado = Δp_objeto (real) + Δp_cámara (ego-movimiento)
+Δp_observado = Δp_objeto + Δp_cámara
 ```
 
-El tracker del ítem b mide todo en píxeles de la imagen. Por eso los autos estacionados parecen moverse, la línea de conteo «barre» la escena y el mapa de calor se dispersa.
+Como consecuencia, los objetos estáticos parecen moverse, la línea de conteo se desplaza respecto a la escena, las velocidades se sobrestiman y el mapa de calor se dispersa.
 
 ## Solución
-La aplicación `tracking_vo_gui.py` (interfaz en Tkinter) estima el movimiento de la cámara con **odometría visual** y expresa todas las posiciones en un sistema de coordenadas fijo al mundo, el del primer frame:
 
-1. Detecta puntos del **fondo** con `goodFeaturesToTrack`, enmascarando las cajas de YOLO.
-2. Los sigue con flujo óptico **Lucas-Kanade** piramidal y verificación de ida y vuelta.
-3. Estima el movimiento de la cámara con **RANSAC**: similaridad (4 GL) u homografía (8 GL). Incluye también un modo 3D con la matriz esencial.
-4. Lo estima contra un **keyframe**, no frame a frame, para reducir la deriva.
-5. Calcula el conteo con la línea virtual, la velocidad, las trayectorias y el mapa de calor en **coordenadas del mundo**.
-6. Construye un **mosaico** de la escena y dibuja encima las trayectorias compensadas.
+`tracking_vo_gui.py` estima el movimiento de la cámara con odometría visual y expresa las posiciones de los objetos en un sistema de referencia fijo: el del primer frame.
 
-Funciona con **ByteTrack** y con **BoT-SORT**. Además incluye un **simulador de cámara móvil**, que permite medir el error de la odometría con *ground truth*, y un **comparador** sin VO / con VO.
+1. **Puntos del fondo:** se detectan esquinas con `cv2.goodFeaturesToTrack`, excluyendo las cajas detectadas por YOLO.
+2. **Seguimiento:** flujo óptico Lucas-Kanade piramidal con verificación de ida y vuelta.
+3. **Estimación del movimiento:** RANSAC con un modelo de similaridad (4 grados de libertad) o una homografía (8 grados de libertad).
+4. **Keyframes:** cada frame se estima contra un keyframe y no contra el frame anterior, para limitar la acumulación de error.
+5. **Coordenadas del mundo:** el conteo con la línea virtual, la velocidad, las trayectorias y el mapa de calor se calculan sobre el sistema de referencia fijo.
+6. **Mosaico:** se construye una vista panorámica de la escena con las trayectorias compensadas.
+
+El método funciona con ByteTrack y con BoT-SORT. La aplicación incluye además:
+
+- un simulador de cámara en movimiento, que permite medir el error de la odometría frente a un movimiento conocido;
+- un comparador de configuraciones con y sin odometría visual.
 
 ## Ejecución
+
 ```bash
 pip install ultralytics opencv-python numpy pandas matplotlib pillow lap
 python tracking_vo_gui.py
 ```
-1. En **1. Fuente** elige la webcam o un archivo de video. Si colocas un video en una carpeta `videos/` junto al script, se carga automáticamente.
-2. Elige el modelo y el tracker. Para video aéreo (dron) usa `yolo11s-obb.pt`.
-3. Activa **Odometría visual** y elige el modelo de movimiento.
-4. Dibuja la línea de conteo y pulsa **Iniciar**. Al final pulsa **Analizar trayectorias** o exporta el CSV.
 
-**Video usado en el informe:** `carros arriba.mp4` (dron, 1920×1080, 30 fps, 529 frames, unos 17,6 s). No se sube por su tamaño (44 MB). Cualquier video aéreo o grabado con la cámara en movimiento sirve.
+1. Seleccione la fuente (webcam o archivo de video). Un video ubicado en la carpeta `videos/` junto al script se carga automáticamente.
+2. Seleccione el modelo y el tracker. Para video aéreo se recomienda `yolo11s-obb.pt`.
+3. Active la odometría visual y elija el modelo de movimiento.
+4. Dibuje la línea de conteo y presione **Iniciar**. Al finalizar, use **Analizar trayectorias** o exporte el CSV.
 
-## Resultados (`resultados/`)
-| Archivo | Contenido |
+El video del experimento (`carros arriba.mp4`) no se incluye por su tamaño. Es una grabación aérea con dron de 1920 × 1080 px, 30 fps y 17,6 s de duración.
+
+## Resultados
+
+| Archivo (`resultados/`) | Contenido |
 |---|---|
-| `analisis_trayectorias_sin_vo.png` | Ítem b sin compensación: arcos falsos y mapa de calor disperso |
-| `analisis_trayectorias_con_vo.png` | Con odometría visual: trayectorias sobre el mosaico, mapa de calor y pose de la cámara |
-| `comparacion_configuraciones.png` | Pestaña de comparación (FPS, cruces, IDs, puntaje) |
-| `resumen_trayectorias_sin_vo.csv` / `resumen_trayectorias_con_vo.csv` | Resumen por ID (desplazamiento, rectitud, velocidad) |
+| `analisis_trayectorias_sin_vo.png` | Trayectorias y mapa de calor sin compensación |
+| `analisis_trayectorias_con_vo.png` | Trayectorias compensadas sobre el mosaico, mapa de calor y pose de la cámara |
+| `comparacion_configuraciones.png` | Comparación de configuraciones: FPS, cruces e identificadores |
+| `resumen_trayectorias_sin_vo.csv`, `resumen_trayectorias_con_vo.csv` | Resumen por identificador: desplazamiento, rectitud y velocidad |
 | `trayectorias_sin_vo.csv` | Trayectorias crudas: `id, frame, time_s, x, y, xw, yw, v_px_s, class, conf` |
 
-**Resultado principal:** el desplazamiento mediano de las 50 trayectorias baja de **278,8 px a 8,8 px** con odometría visual, y los autos identificados como estacionarios suben de 5 a 34.
+Resultados sobre 50 trayectorias del video de prueba:
+
+| Métrica | Sin odometría visual | Con odometría visual |
+|---|---|---|
+| Desplazamiento mediano | 278,8 px | 8,8 px |
+| Trayectorias identificadas como estacionarias (< 20 px) | 5 | 34 |
+| Velocidad media mediana | 39,4 px/s | 16,8 px/s |
+| Rectitud mediana de los vehículos en circulación | 0,872 | 0,953 |
