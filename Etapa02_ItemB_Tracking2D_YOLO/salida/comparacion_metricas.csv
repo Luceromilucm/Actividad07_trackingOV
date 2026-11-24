@@ -1,0 +1,12 @@
+ranking,ejecucion,modelo,tracker,fuente,confianza,frames,tiempo_total_s,ms_por_frame,fps,x_tiempo_real,carga_modelo_s,cruces_pos,cruces_neg,cruces_total,error_cruces,ids_unicos,error_ids,tracks_validos,dur_media_s,pct_tracks_cortos,continuidad,det_por_frame,conf_media,dispositivo,puntaje,score_precision,score_estabilidad,score_velocidad
+1,yolo11n.pt + bytetrack,yolo11n.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,300,34.19,90.2,8.92,0.3,0.29,0,7,7,,52,,41,3.48,0.346,0.9558,12.38,0.504,CPU,86.85,,0.775,1.0
+2,yolov8n.pt + bytetrack,yolov8n.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,300,48.46,126.63,6.21,0.21,0.1,3,7,10,,58,,53,3.22,0.293,0.9631,15.01,0.544,CPU,76.24,,0.809,0.697
+3,yolov8n.pt + bytetrack (2),yolov8n.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,1764,265.44,120.26,6.65,0.22,0.06,25,15,40,,225,,180,4.75,0.369,0.9639,12.91,0.558,CPU,75.65,,0.764,0.746
+4,yolo11n.pt + botsort,yolo11n.pt,botsort,12570536_1080_1920_30fps.mp4,0.3,300,49.38,140.14,6.1,0.2,0.1,0,7,7,,48,,37,3.89,0.333,0.9548,12.41,0.504,CPU,74.11,,0.782,0.684
+5,yolo11s.pt + bytetrack,yolo11s.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,300,69.49,196.48,4.34,0.14,0.18,1,6,7,,47,,46,3.89,0.17,0.9475,15.19,0.528,CPU,71.42,,0.877,0.486
+6,yolov8n.pt + botsort,yolov8n.pt,botsort,12570536_1080_1920_30fps.mp4,0.3,300,72.65,203.82,4.16,0.14,0.18,3,7,10,,55,,51,3.35,0.273,0.9631,15.01,0.544,CPU,67.36,,0.822,0.466
+7,yolov8s.pt + bytetrack,yolov8s.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,300,80.09,226.54,3.77,0.13,0.24,1,8,9,,69,,57,3.81,0.275,0.9789,20.72,0.536,CPU,65.84,,0.826,0.423
+8,yolo11s.pt + botsort,yolo11s.pt,botsort,12570536_1080_1920_30fps.mp4,0.3,300,100.39,298.76,3.0,0.1,0.16,2,6,8,,45,,44,4.09,0.156,0.9469,15.21,0.527,CPU,65.65,,0.885,0.336
+9,yolov8s.pt + botsort,yolov8s.pt,botsort,12570536_1080_1920_30fps.mp4,0.3,300,135.88,401.13,2.21,0.07,0.13,1,8,9,,65,,55,3.97,0.246,0.9784,20.74,0.536,CPU,59.53,,0.844,0.248
+10,yolov8m.pt + bytetrack,yolov8m.pt,bytetrack,12570536_1080_1920_30fps.mp4,0.3,300,207.65,641.85,1.45,0.05,0.5,0,11,11,,59,,53,4.02,0.22,0.9783,19.98,0.547,CPU,56.89,,0.859,0.163
+11,yolov8m.pt + botsort,yolov8m.pt,botsort,12570536_1080_1920_30fps.mp4,0.3,300,227.39,712.01,1.32,0.04,0.16,0,11,11,,59,,52,4.1,0.237,0.978,20.0,0.547,CPU,55.68,,0.849,0.148
