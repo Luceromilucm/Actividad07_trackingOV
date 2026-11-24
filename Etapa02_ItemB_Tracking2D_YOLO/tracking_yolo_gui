@@ -1,0 +1,1731 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Tracking 2D con YOLO + ByteTrack / BoT-SORT  ·  GUI + comparación de modelos
+============================================================================
+- Fuente: webcam o archivo de video
+- Conteo de objetos que cruzan una línea virtual (editable con el mouse)
+- Guarda trayectorias (id, frame, tiempo, x, y, clase, confianza) en CSV
+- Análisis de trayectorias dentro de la aplicación
+- COMPARACIÓN: ejecuta varios modelos YOLO x trackers sobre el MISMO video,
+  acumula los registros y las métricas de cada uno (incluido el tiempo de
+  procesamiento) y calcula un ranking con puntaje ponderado.
+
+- Soporta modelos estándar (yolov8*, yolo11*) y modelos OBB (yolo11n-obb, yolo11s-obb)
+- Interfaz moderna con modo oscuro / claro (botón arriba a la derecha)
+
+Instalación (los modelos yolo11 / OBB requieren ultralytics >= 8.3):
+    pip install -U ultralytics opencv-python numpy pandas matplotlib pillow
+
+Ejecución:
+    python tracking_yolo_gui_comparacion.py
+"""
+
+import os
+import queue
+import re
+import threading
+import time
+from collections import defaultdict, deque
+
+import cv2
+import numpy as np
+import pandas as pd
+import tkinter as tk
+import tkinter.font as tkfont
+from tkinter import filedialog, messagebox, ttk
+
+import matplotlib
+
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
+from PIL import Image, ImageTk  # noqa: E402
+
+MIN_POINTS = 5      # mínimo de puntos para considerar válida una trayectoria
+SHORT_TRACK = 15    # trayectorias con menos frames que esto = "cortas" (fragmentadas)
+CSV_COLUMNS = ["id", "frame", "time_s", "x", "y", "class", "conf"]
+TRACKER_COLORS = {"bytetrack": "#5b8cff", "botsort": "#ffa94d"}
+DEFAULT_IMGSZ = 640  # tamaño de entrada de YOLO (los modelos OBB se entrenaron a 1024)
+
+STD_MODELS = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolo11n.pt", "yolo11s.pt"]
+OBB_MODELS = ["yolo11n-obb.pt", "yolo11s-obb.pt"]
+
+# Los modelos OBB se entrenaron con DOTA (imágenes aéreas) y sus clases NO son las de COCO.
+# Equivalencias: id de clase COCO usado en la GUI -> nombre de clase DOTA.
+# Persona, Bicicleta y Moto no existen en DOTA.
+COCO_TO_OBB_NAMES = {2: ("small vehicle",), 5: ("large vehicle",), 7: ("large vehicle",)}
+
+
+# ----------------------------------------------------------------------------
+# Tema visual (oscuro / claro)
+# ----------------------------------------------------------------------------
+PALETTES = {
+    "dark": {
+        "bg": "#0f131c", "panel": "#161b27", "card": "#212a3d", "hover": "#2c3752",
+        "border": "#2a3246", "fg": "#e8ebf4", "muted": "#8a94ad", "field": "#1a2030",
+        "accent": "#6d8dff", "accent_h": "#8ba5ff", "accent_fg": "#0a0f1f",
+        "danger": "#ef5b67", "danger_h": "#f47f88", "ok": "#34d399", "warn": "#fbbf24",
+        "sel": "#2c3b6e", "row_alt": "#1b2130", "canvas": "#07090e",
+    },
+    "light": {
+        "bg": "#f4f6fb", "panel": "#ffffff", "card": "#e9edf6", "hover": "#dce3f2",
+        "border": "#d5dbe8", "fg": "#1c2336", "muted": "#69738c", "field": "#ffffff",
+        "accent": "#3b5bdb", "accent_h": "#4c6ef5", "accent_fg": "#ffffff",
+        "danger": "#e03e3e", "danger_h": "#f05252", "ok": "#0e9f6e", "warn": "#c2750a",
+        "sel": "#dbe4ff", "row_alt": "#f4f6fb", "canvas": "#14171f",
+    },
+}
+FONT_CANDIDATES = ("Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue",
+                   "Inter", "Ubuntu", "Noto Sans", "DejaVu Sans")
+
+
+def pick_font_family(root):
+    available = set(tkfont.families(root))
+    for fam in FONT_CANDIDATES:
+        if fam in available:
+            return fam
+    return "Helvetica"
+
+
+def set_mpl_theme(p):
+    """Aplica la paleta a los gráficos de matplotlib (se usa al crear/redibujar figuras)."""
+    matplotlib.rcParams.update({
+        "figure.facecolor": p["bg"], "savefig.facecolor": p["bg"],
+        "axes.facecolor": p["panel"], "axes.edgecolor": p["border"],
+        "axes.labelcolor": p["fg"], "axes.titlecolor": p["fg"],
+        "axes.spines.top": False, "axes.spines.right": False,
+        "text.color": p["fg"], "xtick.color": p["muted"], "ytick.color": p["muted"],
+        "grid.color": p["border"], "legend.facecolor": p["panel"],
+        "legend.edgecolor": p["border"],
+    })
+
+
+def apply_theme(root, name="dark"):
+    """Configura todos los estilos ttk (tema base 'clam') y devuelve la paleta usada."""
+    p = dict(PALETTES[name])
+    fam = pick_font_family(root)
+    p["font"] = fam
+
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        try:
+            tkfont.nametofont(fname).configure(family=fam, size=10)
+        except tk.TclError:
+            pass
+
+    st = ttk.Style(root)
+    st.theme_use("clam")
+    root.configure(bg=p["bg"])
+
+    st.configure(".", background=p["bg"], foreground=p["fg"], fieldbackground=p["field"],
+                 bordercolor=p["border"], lightcolor=p["bg"], darkcolor=p["bg"],
+                 troughcolor=p["field"], focuscolor=p["bg"], selectbackground=p["sel"],
+                 selectforeground=p["fg"], insertcolor=p["fg"], font=(fam, 10))
+
+    # --- Marcos y etiquetas
+    st.configure("TFrame", background=p["bg"])
+    st.configure("Header.TFrame", background=p["panel"])
+    st.configure("Panel.TFrame", background=p["panel"])
+    st.configure("Accent.TFrame", background=p["accent"])
+    st.configure("TLabel", background=p["bg"], foreground=p["fg"])
+    st.configure("Muted.TLabel", foreground=p["muted"], font=(fam, 9))
+    st.configure("Logo.TLabel", background=p["panel"], foreground=p["accent"],
+                 font=(fam, 22, "bold"))
+    st.configure("Title.TLabel", background=p["panel"], foreground=p["fg"],
+                 font=(fam, 15, "bold"))
+    st.configure("Subtitle.TLabel", background=p["panel"], foreground=p["muted"],
+                 font=(fam, 9))
+    st.configure("Status.TLabel", background=p["panel"], foreground=p["fg"])
+    st.configure("Card.TFrame", background=p["panel"])
+    st.configure("CardText.TLabel", background=p["panel"], foreground=p["fg"])
+    st.configure("CardMuted.TLabel", background=p["panel"], foreground=p["muted"],
+                 font=(fam, 8, "bold"))
+    st.configure("CardPos.TLabel", background=p["panel"], foreground=p["ok"],
+                 font=(fam, 28, "bold"))
+    st.configure("CardNeg.TLabel", background=p["panel"], foreground=p["warn"],
+                 font=(fam, 28, "bold"))
+    st.configure("Pos.TLabel", foreground=p["ok"], font=(fam, 26, "bold"))
+    st.configure("Neg.TLabel", foreground=p["warn"], font=(fam, 26, "bold"))
+    st.configure("TLabelframe", background=p["bg"], bordercolor=p["border"],
+                 lightcolor=p["border"], darkcolor=p["border"], relief="solid",
+                 borderwidth=1)
+    st.configure("TLabelframe.Label", background=p["bg"], foreground=p["accent"],
+                 font=(fam, 10, "bold"))
+
+    # --- Botones
+    def button(style, bg, fg, hover, border=None, bold=False):
+        st.configure(style, background=bg, foreground=fg, bordercolor=border or bg,
+                     lightcolor=bg, darkcolor=bg, focuscolor=bg, relief="flat",
+                     borderwidth=1, padding=(12, 7), anchor="center",
+                     font=(fam, 10, "bold") if bold else (fam, 10))
+        st.map(style,
+               background=[("disabled", p["panel"]), ("pressed", hover), ("active", hover)],
+               foreground=[("disabled", p["muted"])],
+               bordercolor=[("disabled", p["border"]), ("active", hover)],
+               lightcolor=[("disabled", p["panel"]), ("active", hover), ("pressed", hover)],
+               darkcolor=[("disabled", p["panel"]), ("active", hover), ("pressed", hover)])
+
+    button("TButton", p["card"], p["fg"], p["hover"], p["border"])
+    button("Accent.TButton", p["accent"], p["accent_fg"], p["accent_h"], bold=True)
+    button("Danger.TButton", p["danger"], "#ffffff", p["danger_h"], bold=True)
+
+    # --- Check / Radio
+    for s in ("TCheckbutton", "TRadiobutton"):
+        st.configure(s, background=p["bg"], foreground=p["fg"], padding=3,
+                     indicatorbackground=p["field"], indicatorcolor=p["field"],
+                     indicatorforeground=p["accent_fg"], focuscolor=p["bg"])
+        st.map(s,
+               background=[("active", p["bg"])],
+               foreground=[("disabled", p["muted"])],
+               indicatorbackground=[("selected", p["accent"]), ("active", p["hover"])],
+               indicatorcolor=[("selected", p["accent"]), ("active", p["hover"])],
+               indicatorforeground=[("selected", p["accent_fg"])])
+
+    # --- Campos de entrada
+    for s in ("TEntry", "TSpinbox", "TCombobox"):
+        st.configure(s, fieldbackground=p["field"], foreground=p["fg"], background=p["card"],
+                     bordercolor=p["border"], lightcolor=p["border"], darkcolor=p["border"],
+                     insertcolor=p["fg"], arrowcolor=p["muted"], padding=5)
+        st.map(s, bordercolor=[("focus", p["accent"])],
+               lightcolor=[("focus", p["accent"])], darkcolor=[("focus", p["accent"])],
+               arrowcolor=[("active", p["fg"])])
+    st.map("TCombobox",
+           fieldbackground=[("readonly", p["field"])],
+           foreground=[("readonly", p["fg"])],
+           selectbackground=[("readonly", p["field"])],
+           selectforeground=[("readonly", p["fg"])])
+
+    # --- Pestañas
+    st.configure("TNotebook", background=p["bg"], borderwidth=0, tabmargins=(0, 4, 0, 0))
+    st.configure("TNotebook.Tab", background=p["panel"], foreground=p["muted"],
+                 padding=(18, 9), borderwidth=0, lightcolor=p["panel"], darkcolor=p["panel"],
+                 font=(fam, 10, "bold"))
+    st.map("TNotebook.Tab",
+           background=[("selected", p["bg"]), ("active", p["hover"])],
+           foreground=[("selected", p["accent"]), ("active", p["fg"])],
+           lightcolor=[("selected", p["bg"])], darkcolor=[("selected", p["bg"])])
+
+    # --- Sliders y progreso
+    st.configure("Horizontal.TScale", background=p["accent"], troughcolor=p["field"],
+                 bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"])
+    st.map("Horizontal.TScale", background=[("active", p["accent_h"])])
+    st.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"],
+                 bordercolor=p["panel"], lightcolor=p["accent"], darkcolor=p["accent"],
+                 thickness=8)
+
+    # --- Barras de desplazamiento
+    for s in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        st.configure(s, background=p["card"], troughcolor=p["panel"], bordercolor=p["panel"],
+                     lightcolor=p["card"], darkcolor=p["card"], arrowcolor=p["muted"],
+                     relief="flat", gripcount=0)
+        st.map(s, background=[("active", p["hover"])])
+
+    # --- Tablas
+    st.configure("Treeview", background=p["panel"], fieldbackground=p["panel"],
+                 foreground=p["fg"], rowheight=26, borderwidth=0, relief="flat")
+    st.map("Treeview", background=[("selected", p["sel"])],
+           foreground=[("selected", p["fg"])])
+    st.configure("Treeview.Heading", background=p["card"], foreground=p["fg"], relief="flat",
+                 padding=(6, 7), borderwidth=0, font=(fam, 9, "bold"))
+    st.map("Treeview.Heading", background=[("active", p["hover"])])
+
+    set_mpl_theme(p)
+    return p
+
+
+# ----------------------------------------------------------------------------
+# Geometría y utilidades
+# ----------------------------------------------------------------------------
+def side(p, a, b):
+    """Producto cruz: signo = lado de la recta AB en que está el punto p."""
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+
+def crossed_line(p_prev, p_curr, a, b):
+    """+1 si cruzó el segmento AB del lado (-) al (+), -1 en sentido contrario, 0 si no cruzó."""
+    d1, d2 = side(p_prev, a, b), side(p_curr, a, b)
+    d3, d4 = side(a, p_prev, p_curr), side(b, p_prev, p_curr)
+    if d1 * d2 < 0 and d3 * d4 < 0:
+        return 1 if d1 < 0 else -1
+    return 0
+
+
+def color_for_id(track_id):
+    rng = np.random.default_rng(int(track_id) * 9973 + 7)
+    return tuple(int(c) for c in rng.integers(60, 255, 3))  # BGR
+
+
+def safe_name(text):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")
+
+
+def obb_classes_from_gui(classes, names):
+    """
+    Traduce las clases COCO elegidas en la GUI a ids de clase de un modelo OBB (DOTA).
+    None = todas las clases. Devuelve [] si ninguna clase elegida tiene equivalente.
+    """
+    if classes is None:
+        return None
+    wanted = {n for c in classes for n in COCO_TO_OBB_NAMES.get(c, ())}
+    return sorted(i for i, n in names.items() if n in wanted)
+
+
+def extract_detections(det, is_obb):
+    """
+    Unifica cajas normales (Boxes) y cajas orientadas (OBB) de Ultralytics.
+    Devuelve: ids, clases, confianzas, centros (N,2) y polígonos (N,4,2).
+    """
+    ids = det.id.int().cpu().tolist()
+    clss = det.cls.int().cpu().tolist()
+    confs = det.conf.cpu().tolist()
+    if is_obb:
+        centers = det.xywhr[:, :2].cpu().numpy()      # cx, cy de la caja rotada
+        polys = det.xyxyxyxy.cpu().numpy()            # 4 esquinas de la caja rotada
+    else:
+        xyxy = det.xyxy.cpu().numpy()
+        centers = np.stack([(xyxy[:, 0] + xyxy[:, 2]) / 2,
+                            (xyxy[:, 1] + xyxy[:, 3]) / 2], axis=1)
+        polys = np.stack([xyxy[:, [0, 1]], xyxy[:, [2, 1]],
+                          xyxy[:, [2, 3]], xyxy[:, [0, 3]]], axis=1)
+    return ids, clss, confs, centers, polys
+
+
+# ----------------------------------------------------------------------------
+# Análisis de trayectorias (una ejecución)
+# ----------------------------------------------------------------------------
+SUMMARY_COLS = ["id", "clase", "frames", "duracion_s", "distancia_px",
+                "desplazamiento_px", "rectitud", "velocidad_px_s", "angulo_deg"]
+
+
+def compute_summary(df):
+    rows = []
+    for tid, g in df.sort_values("frame").groupby("id"):
+        if len(g) < MIN_POINTS:
+            continue
+        xy = g[["x", "y"]].to_numpy(dtype=float)
+        path_len = np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()
+        vec = xy[-1] - xy[0]
+        disp = float(np.linalg.norm(vec))
+        dur = float(g["time_s"].iloc[-1] - g["time_s"].iloc[0])
+        rows.append({
+            "id": int(tid),
+            "clase": g["class"].mode().iloc[0],
+            "frames": len(g),
+            "duracion_s": round(dur, 2),
+            "distancia_px": round(path_len, 1),
+            "desplazamiento_px": round(disp, 1),
+            "rectitud": round(disp / path_len, 3) if path_len > 0 else 0.0,
+            "velocidad_px_s": round(path_len / dur, 1) if dur > 0 else 0.0,
+            # 0° = derecha, 90° = abajo (coordenadas de imagen)
+            "angulo_deg": round(float(np.degrees(np.arctan2(vec[1], vec[0]))), 1),
+        })
+    return pd.DataFrame(rows, columns=SUMMARY_COLS)
+
+
+def draw_analysis(fig, df, summary, bg_bgr):
+    fig.clear()
+    ax1, ax2 = fig.subplots(1, 2)
+    bg = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB) if bg_bgr is not None else None
+    if bg is not None:
+        h, w = bg.shape[:2]
+    else:
+        w, h = int(df["x"].max()) + 1, int(df["y"].max()) + 1
+
+    cmap = matplotlib.colormaps["tab20"]
+    if bg is not None:
+        ax1.imshow(bg)
+    valid_ids = set(summary["id"]) if not summary.empty else set()
+    for tid, g in df.groupby("id"):
+        if tid not in valid_ids:
+            continue
+        c = cmap(int(tid) % 20)
+        ax1.plot(g["x"], g["y"], "-", color=c, linewidth=1.5)
+        ax1.plot(g["x"].iloc[0], g["y"].iloc[0], "o", color=c, markersize=4)
+        ax1.plot(g["x"].iloc[-1], g["y"].iloc[-1], "s", color=c, markersize=4)
+    ax1.set_title("Trayectorias (● inicio, ■ fin)", fontsize=10)
+    ax1.set_xlim(0, w)
+    ax1.set_ylim(h, 0)
+    ax1.set_aspect("equal")
+    ax1.axis("off" if bg is not None else "on")
+
+    if bg is not None:
+        ax2.imshow(bg)
+    heat, _, _ = np.histogram2d(df["y"], df["x"], bins=[36, 36], range=[[0, h], [0, w]])
+    ax2.imshow(heat, extent=[0, w, h, 0], cmap="inferno",
+               alpha=0.65 if bg is not None else 1.0)
+    ax2.set_title("Mapa de calor de posiciones", fontsize=10)
+    ax2.axis("off")
+    fig.tight_layout()
+
+
+# ----------------------------------------------------------------------------
+# Métricas de una ejecución y puntaje comparativo
+# ----------------------------------------------------------------------------
+def compute_run_metrics(df, summary, perf, pos, neg):
+    """Métricas de desempeño (tiempo) y de calidad del tracking (sin ground truth)."""
+    n = max(int(perf["frames"]), 1)
+    proc_s = float(perf["proc_s"])
+
+    # Velocidad "en régimen": se excluye el 1er frame (calentamiento de CUDA / modelo)
+    steady_n = n - 1
+    steady_t = proc_s - float(perf["first_proc_s"])
+    if steady_n > 0 and steady_t > 0:
+        fps = steady_n / steady_t
+    else:
+        fps = n / proc_s if proc_s > 0 else 0.0
+    infer = perf["infer_s"][1:] or perf["infer_s"]
+    ms_frame = 1000.0 * float(np.mean(infer)) if infer else 0.0
+    x_rt = fps / perf["src_fps"] if perf["src_fps"] > 0 else 0.0
+
+    # Calidad del tracking
+    sizes = df.groupby("id").size()
+    pct_cortos = float((sizes < SHORT_TRACK).mean()) if len(sizes) else 0.0
+    gaps = pairs = 0
+    for _, g in df.groupby("id"):
+        fr = np.sort(g["frame"].to_numpy())
+        if len(fr) > 1:
+            d = np.diff(fr)
+            gaps += int((d > 1).sum())
+            pairs += len(d)
+    continuidad = 1.0 - gaps / pairs if pairs > 0 else 1.0
+
+    return {
+        "frames": int(perf["frames"]),
+        "tiempo_s": proc_s,
+        "ms_frame": ms_frame,
+        "fps": fps,
+        "x_rt": x_rt,
+        "carga_s": float(perf["load_s"]),
+        "cruces_pos": int(pos),
+        "cruces_neg": int(neg),
+        "cruces_total": int(pos + neg),
+        "ids_unicos": int(df["id"].nunique()),
+        "tracks_validos": int(len(summary)),
+        "dur_media_s": float(summary["duracion_s"].mean()) if not summary.empty else 0.0,
+        "pct_cortos": pct_cortos,
+        "continuidad": continuidad,
+        "det_por_frame": len(df) / n,
+        "conf_media": float(df["conf"].mean()),
+    }
+
+
+def compute_scores(runs, w_prec, w_stab, w_speed, gt_cross, gt_objs):
+    """
+    Puntaje 0-100 = media ponderada de tres componentes (cada una en 0-1):
+      - Precisión : cercanía del conteo / de los IDs únicos a los valores reales
+                    (solo si el usuario los ingresó; si no, esta componente se omite)
+      - Estabilidad: 0.6*(1 - % trayectorias cortas) + 0.4*continuidad
+      - Velocidad : FPS / FPS de la ejecución más rápida
+    """
+    if not runs:
+        return []
+    max_fps = max(r["metrics"]["fps"] for r in runs) or 1.0
+    out = []
+    for r in runs:
+        m = r["metrics"]
+        comps, err_c, err_i = [], None, None
+        if gt_cross is not None:
+            err_c = abs(m["cruces_total"] - gt_cross)
+            comps.append(max(0.0, 1 - err_c / max(gt_cross, 1.0)))
+        if gt_objs is not None:
+            err_i = abs(m["ids_unicos"] - gt_objs)
+            comps.append(max(0.0, 1 - err_i / max(gt_objs, 1.0)))
+        prec = sum(comps) / len(comps) if comps else None
+        stab = 0.6 * (1 - m["pct_cortos"]) + 0.4 * m["continuidad"]
+        speed = m["fps"] / max_fps
+        parts = [(w_stab, stab), (w_speed, speed)]
+        if prec is not None:
+            parts.append((w_prec, prec))
+        wsum = sum(w for w, _ in parts)
+        score = 100.0 * sum(w * v for w, v in parts) / wsum if wsum > 0 else 0.0
+        out.append({"run": r, "score": score, "prec": prec, "stab": stab, "speed": speed,
+                    "err_c": err_c, "err_i": err_i})
+    out.sort(key=lambda d: -d["score"])
+    for i, d in enumerate(out):
+        d["rank"] = i + 1
+    return out
+
+
+def rows_to_df(rows):
+    data = []
+    for d in rows:
+        r, m = d["run"], d["run"]["metrics"]
+        data.append({
+            "ranking": d["rank"], "ejecucion": r["label"], "modelo": r["model"],
+            "tracker": r["tracker"], "fuente": r["source"], "confianza": r["conf"],
+            "frames": m["frames"], "tiempo_total_s": round(m["tiempo_s"], 2),
+            "ms_por_frame": round(m["ms_frame"], 2), "fps": round(m["fps"], 2),
+            "x_tiempo_real": round(m["x_rt"], 2), "carga_modelo_s": round(m["carga_s"], 2),
+            "cruces_pos": m["cruces_pos"], "cruces_neg": m["cruces_neg"],
+            "cruces_total": m["cruces_total"], "error_cruces": d["err_c"],
+            "ids_unicos": m["ids_unicos"], "error_ids": d["err_i"],
+            "tracks_validos": m["tracks_validos"], "dur_media_s": round(m["dur_media_s"], 2),
+            "pct_tracks_cortos": round(m["pct_cortos"], 3),
+            "continuidad": round(m["continuidad"], 4),
+            "det_por_frame": round(m["det_por_frame"], 2),
+            "conf_media": round(m["conf_media"], 3), "dispositivo": r["device"],
+            "puntaje": round(d["score"], 2),
+            "score_precision": None if d["prec"] is None else round(d["prec"], 3),
+            "score_estabilidad": round(d["stab"], 3), "score_velocidad": round(d["speed"], 3),
+        })
+    return pd.DataFrame(data)
+
+
+def draw_comparison(fig, rows, gt_cross, gt_objs):
+    fig.clear()
+    if not rows:
+        fig.text(0.5, 0.5, "Sin ejecuciones todavía", ha="center", va="center", color="#666")
+        return
+    axs = fig.subplots(2, 2).ravel()
+    labels = [d["run"]["label"].replace(" + ", "\n") for d in rows]
+    colors = [TRACKER_COLORS.get(d["run"]["tracker"], "#888888") for d in rows]
+    x = np.arange(len(rows))
+
+    def bars(ax, vals, title, fmt="%.1f", ref=None):
+        b = ax.bar(x, vals, color=colors)
+        ax.bar_label(b, fmt=fmt, fontsize=7)
+        ax.set_title(title, fontsize=9)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=6)
+        ax.tick_params(axis="y", labelsize=7)
+        if ref is not None:
+            ax.axhline(ref, color="red", ls="--", lw=1, label=f"real = {ref:g}")
+            ax.legend(fontsize=6, loc="upper right")
+
+    bars(axs[0], [d["score"] for d in rows], "Puntaje global (0-100)")
+    bars(axs[1], [d["run"]["metrics"]["fps"] for d in rows], "Velocidad (FPS, sin 1er frame)")
+    bars(axs[2], [d["run"]["metrics"]["cruces_total"] for d in rows],
+         "Cruces totales de la línea", "%.0f", gt_cross)
+    bars(axs[3], [d["run"]["metrics"]["ids_unicos"] for d in rows],
+         "IDs únicos (menos = menos fragmentación)", "%.0f", gt_objs)
+
+    trackers = sorted({d["run"]["tracker"] for d in rows})
+    fig.legend(handles=[Patch(color=TRACKER_COLORS.get(t, "#888888"), label=t) for t in trackers],
+               loc="lower center", ncol=max(len(trackers), 1), fontsize=7, frameon=False)
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
+
+
+def draw_traj_grid(fig, rows):
+    fig.clear()
+    if not rows:
+        fig.text(0.5, 0.5, "Sin ejecuciones todavía", ha="center", va="center", color="#666")
+        return
+    n = len(rows)
+    cols = min(3, n)
+    nr = int(np.ceil(n / cols))
+    axs = fig.subplots(nr, cols, squeeze=False)
+    cmap = matplotlib.colormaps["tab20"]
+    for i, ax in enumerate(axs.ravel()):
+        if i >= n:
+            ax.axis("off")
+            continue
+        run = rows[i]["run"]
+        df, summary, bg = run["df"], run["summary"], run["bg"]
+        if bg is not None:
+            ax.imshow(cv2.cvtColor(bg, cv2.COLOR_BGR2RGB))
+            h, w = bg.shape[:2]
+        else:
+            w, h = int(df["x"].max()) + 1, int(df["y"].max()) + 1
+        valid = set(summary["id"]) if not summary.empty else set()
+        for tid, g in df.groupby("id"):
+            if tid in valid:
+                ax.plot(g["x"], g["y"], "-", color=cmap(int(tid) % 20), linewidth=1.2)
+        lx1, ly1, lx2, ly2 = run["line"]
+        ax.plot([lx1 * w, lx2 * w], [ly1 * h, ly2 * h], "r-", linewidth=1.5)
+        ax.set_xlim(0, w)
+        ax.set_ylim(h, 0)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title(f"#{rows[i]['rank']} {run['label']} · {len(valid)} trayectorias", fontsize=8)
+    fig.tight_layout()
+
+
+# ----------------------------------------------------------------------------
+# Hilo de procesamiento (YOLO + tracker)
+# ----------------------------------------------------------------------------
+class Worker(threading.Thread):
+    def __init__(self, app, cfg):
+        super().__init__(daemon=True)
+        self.app, self.cfg = app, cfg
+        self.stop_ev = threading.Event()
+        self.pause_ev = threading.Event()
+        # Estado leído por la interfaz
+        self.counts_pos = self.counts_neg = 0
+        self.counted_ids, self.unique_ids = set(), set()
+        self.active = 0
+        self.fps = 0.0
+        self.frame_idx = 0
+        self.total_frames = 0
+        self.records = []
+        self.bg_frame = None
+        # Medición de tiempos
+        self.infer_s = []          # tiempo de model.track() por frame
+        self.proc_time = 0.0       # tiempo de procesamiento total (sin pausas ni esperas)
+        self.first_proc_s = 0.0
+        self.load_s = 0.0
+        self.device = "desconocido"
+        self.line_used = tuple(app.line_rel)
+        self.conf_used = app.conf
+        self.perf = None
+        self.error = None
+
+    def status(self, text):
+        self.app.events.put(("status", text))
+
+    def run(self):
+        try:
+            self._loop()
+        except Exception as e:  # se muestra en la interfaz
+            self.error = f"{type(e).__name__}: {e}"
+            self.app.events.put(("error", self.error))
+        finally:
+            self.app.events.put(("finished", None))
+
+    def _loop(self):
+        from ultralytics import YOLO
+
+        cfg, app = self.cfg, self.app
+        bench = bool(cfg.get("benchmark"))
+        max_frames = int(cfg.get("max_frames") or 0)
+
+        self.status(f"Cargando {cfg['model']} (la primera vez puede descargarse)…")
+        try:
+            import torch
+            self.device = (f"GPU ({torch.cuda.get_device_name(0)})"
+                           if torch.cuda.is_available() else "CPU")
+        except Exception:
+            pass
+        t_load = time.perf_counter()
+        model = YOLO(cfg["model"])
+        self.load_s = time.perf_counter() - t_load
+        names = model.names
+        tracker_cfg = "bytetrack.yaml" if cfg["tracker"] == "bytetrack" else "botsort.yaml"
+
+        # Modelos OBB (cajas orientadas): clases DOTA en lugar de COCO
+        is_obb = getattr(model, "task", None) == "obb"
+        classes = cfg["classes"]
+        if is_obb:
+            classes = obb_classes_from_gui(classes, names)
+            if classes is not None and not classes:
+                raise RuntimeError(
+                    f"{os.path.basename(cfg['model'])} es un modelo OBB entrenado con DOTA "
+                    "(imágenes aéreas) y no tiene clases equivalentes a las seleccionadas. "
+                    "Equivalencias: Auto → small vehicle; Bus y Camión → large vehicle. "
+                    "Marca alguna de ellas o deja todas sin marcar.")
+
+        cap = cv2.VideoCapture(cfg["source"])
+        if not cap.isOpened():
+            raise RuntimeError(f"No se pudo abrir la fuente: {cfg['source']}")
+        is_webcam = isinstance(cfg["source"], int)
+        src_fps = cap.get(cv2.CAP_PROP_FPS)
+        src_fps = src_fps if src_fps and src_fps > 1 else 30.0
+        n_src = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if not is_webcam and n_src > 0:
+            self.total_frames = min(n_src, max_frames) if max_frames else n_src
+        elif max_frames:
+            self.total_frames = max_frames
+
+        writer = None
+        trails = defaultdict(lambda: deque(maxlen=300))
+        last_pos = {}
+        t_start = t_prev = time.perf_counter()
+        self.status("Procesando…")
+
+        try:
+            while not self.stop_ev.is_set():
+                if self.pause_ev.is_set():
+                    time.sleep(0.03)
+                    continue
+                if max_frames and self.frame_idx >= max_frames:
+                    break
+                t0 = time.perf_counter()
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                self.frame_idx += 1
+                H, W = frame.shape[:2]
+                if self.bg_frame is None:
+                    self.bg_frame = frame.copy()
+
+                if app.reset_event.is_set():
+                    app.reset_event.clear()
+                    self.counts_pos = self.counts_neg = 0
+                    self.counted_ids.clear()
+
+                line = cfg.get("line") or app.line_rel
+                self.line_used = tuple(line)
+                lx1, ly1, lx2, ly2 = line
+                a, b = (int(lx1 * W), int(ly1 * H)), (int(lx2 * W), int(ly2 * H))
+                conf = cfg["fixed_conf"] if cfg.get("fixed_conf") is not None else app.conf
+                self.conf_used = conf
+
+                ti = time.perf_counter()
+                res = model.track(frame, persist=True, tracker=tracker_cfg, conf=conf,
+                                  classes=classes, imgsz=cfg["imgsz"], verbose=False)[0]
+                self.infer_s.append(time.perf_counter() - ti)
+
+                disp = frame.copy()
+                time_s = (time.perf_counter() - t_start) if is_webcam else self.frame_idx / src_fps
+                active_ids = []
+
+                det = res.obb if is_obb else res.boxes
+                if det is not None and det.id is not None:
+                    ids, clss, confs, centers, polys = extract_detections(det, is_obb)
+                    for (cxf, cyf), poly, tid, c, cf in zip(centers, polys, ids, clss, confs):
+                        cx, cy = int(cxf), int(cyf)
+                        col = color_for_id(tid)
+                        active_ids.append(tid)
+                        self.unique_ids.add(tid)
+                        self.records.append((tid, self.frame_idx, round(time_s, 3),
+                                             cx, cy, names[c], round(cf, 3)))
+                        trails[tid].append((cx, cy))
+
+                        if tid in last_pos:
+                            d = crossed_line(last_pos[tid], (cx, cy), a, b)
+                            if d == 1:
+                                self.counts_pos += 1
+                                self.counted_ids.add(tid)
+                            elif d == -1:
+                                self.counts_neg += 1
+                                self.counted_ids.add(tid)
+                        last_pos[tid] = (cx, cy)
+
+                        cv2.polylines(disp, [poly.astype(np.int32)], True, col, 2, cv2.LINE_AA)
+                        x1, y1 = poly.min(axis=0)  # esquina sup. izq. del polígono (para la etiqueta)
+                        label = f"ID {tid} {names[c]} {cf:.2f}"
+                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        cv2.rectangle(disp, (int(x1), int(y1) - th - 6),
+                                      (int(x1) + tw + 4, int(y1)), col, -1)
+                        cv2.putText(disp, label, (int(x1) + 2, int(y1) - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                        cv2.circle(disp, (cx, cy), 4, col, -1)
+
+                # Estelas (solo de los objetos activos en este frame)
+                n_trail = int(app.trail_len)
+                if n_trail > 1:
+                    for tid in active_ids:
+                        pts = list(trails[tid])[-n_trail:]
+                        if len(pts) > 1:
+                            cv2.polylines(disp, [np.array(pts, np.int32)], False,
+                                          color_for_id(tid), 2, cv2.LINE_AA)
+
+                self.active = len(active_ids)
+
+                # Frame para la interfaz (sin la línea: la dibuja la GUI encima)
+                with app.lock:
+                    app.latest_frame = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+
+                # Video anotado (aquí sí se dibuja la línea y los contadores)
+                if cfg.get("save_video"):
+                    if writer is None:
+                        os.makedirs(cfg["out_dir"], exist_ok=True)
+                        writer = cv2.VideoWriter(
+                            os.path.join(cfg["out_dir"], "resultado.mp4"),
+                            cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (W, H))
+                    rec = disp.copy()
+                    cv2.line(rec, a, b, (0, 0, 255), 3)
+                    cv2.putText(rec, f"(+): {self.counts_pos}  (-): {self.counts_neg}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                    writer.write(rec)
+
+                # Tiempo de procesamiento de este frame (sin pausas ni esperas)
+                dt = time.perf_counter() - t0
+                self.proc_time += dt
+                if self.frame_idx == 1:
+                    self.first_proc_s = dt
+                now = time.perf_counter()
+                self.fps = 0.9 * self.fps + 0.1 / max(now - t_prev, 1e-6)
+                t_prev = now
+
+                # Reproducción a velocidad original solo en ejecuciones individuales
+                if not is_webcam and not bench:
+                    wait = 1.0 / src_fps - dt
+                    if wait > 0:
+                        time.sleep(wait)
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+            self.perf = {"frames": self.frame_idx, "proc_s": self.proc_time,
+                         "first_proc_s": self.first_proc_s, "infer_s": self.infer_s,
+                         "load_s": self.load_s, "device": self.device, "src_fps": src_fps}
+
+
+# ----------------------------------------------------------------------------
+# Aplicación (interfaz)
+# ----------------------------------------------------------------------------
+SUMMARY_TITLES = SUMMARY_COLS
+COMP_COLS = [("run", "Ejecución", 175), ("frames", "Frames", 55), ("tiempo", "Tiempo (s)", 70),
+             ("ms", "ms/frame", 65), ("fps", "FPS", 55), ("rt", "×T.real", 60),
+             ("cruces", "Cruces", 55), ("err_c", "Err. cruces", 75), ("ids", "IDs únicos", 70),
+             ("err_i", "Err. IDs", 60), ("dur", "Dur. media (s)", 90), ("cortos", "% cortos", 65),
+             ("cont", "Continuidad", 80), ("score", "Puntaje", 65), ("rank", "#", 35)]
+
+
+class App(tk.Tk):
+    CLASSES = [("Persona", 0), ("Bicicleta", 1), ("Auto", 2), ("Moto", 3),
+               ("Bus", 5), ("Camión", 7)]
+    DEFAULT_MODELS = STD_MODELS + OBB_MODELS
+
+    def __init__(self):
+        super().__init__()
+        self.title("Tracking 2D · YOLO + ByteTrack / BoT-SORT · Comparador")
+        self.geometry("1400x880")
+        self.minsize(1150, 740)
+
+        # Tema visual (oscuro por defecto; se puede alternar desde el encabezado)
+        self.theme_name = "dark"
+        self.pal = apply_theme(self, self.theme_name)
+
+        # Estado compartido con el hilo
+        self.lock = threading.Lock()
+        self.events = queue.Queue()
+        self.latest_frame = None
+        self.reset_event = threading.Event()
+        self.conf = 0.30
+        self.trail_len = 40
+        self.line_rel = [0.0, 0.5, 1.0, 0.5]  # x1,y1,x2,y2 relativos (0-1)
+        self.worker = None
+
+        # Estado de la interfaz
+        self.out_dir = os.path.abspath("salida")
+        self.video_path = ""
+        self.drawing_line = False
+        self.click_pts = []
+        self.show_hint = True
+        self.img_rect = None
+        self.photo = None
+        self.last_rgb = np.zeros((480, 640, 3), np.uint8)
+        self.records, self.bg_frame = [], None
+        self.last_df, self.last_bg, self.last_summary = None, None, None
+        self.config_widgets = []
+
+        # Comparación
+        self.runs = []
+        self.run_counter = 0
+        self.cmp_rows = []
+        self.bench_queue = deque()
+        self.bench_active = False
+        self.bench_cancelled = False
+        self.bench_errors = []
+        self.bench_done = 0
+        self.bench_total = 0
+        self.bench_params = None
+        self._wjob = None
+
+        self._build_ui()
+        self._style_extras()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(50, lambda: self._show_frame(self.last_rgb))
+        self.after(20, self._poll)
+        self._refresh_comparison()
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        # Barra de estado (se crea primero para que reserve su espacio abajo)
+        bottom = ttk.Frame(self, style="Panel.TFrame", padding=(14, 7))
+        bottom.pack(side="bottom", fill="x")
+        self.status = tk.StringVar(value="Listo. Elige una fuente y presiona «Iniciar».")
+        ttk.Label(bottom, textvariable=self.status, style="Status.TLabel", anchor="w").pack(
+            side="left", fill="x", expand=True)
+        self.progress = ttk.Progressbar(bottom, length=240, mode="determinate", maximum=100)
+        self.progress.pack(side="right", padx=(10, 0))
+
+        # Encabezado con título y selector de tema
+        header = ttk.Frame(self, style="Header.TFrame", padding=(18, 10))
+        header.pack(side="top", fill="x")
+        ttk.Label(header, text="◉", style="Logo.TLabel").pack(side="left")
+        tb = ttk.Frame(header, style="Header.TFrame")
+        tb.pack(side="left", padx=(10, 0))
+        ttk.Label(tb, text="Tracking 2D", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(tb, text="YOLO · ByteTrack · BoT-SORT  —  conteo, trayectorias y comparador "
+                           "de modelos", style="Subtitle.TLabel").pack(anchor="w")
+        self.btn_theme = ttk.Button(header, text="☀  Modo claro", command=self._toggle_theme)
+        self.btn_theme.pack(side="right")
+        ttk.Frame(self, style="Accent.TFrame", height=2).pack(side="top", fill="x")
+
+        left = ttk.Frame(self, padding=(14, 12, 6, 12))
+        left.pack(side="left", fill="y")
+        right = ttk.Frame(self, padding=(6, 12, 14, 12))
+        right.pack(side="left", fill="both", expand=True)
+
+        # --- Fuente
+        f = ttk.LabelFrame(left, text="1. Fuente", padding=(10, 6))
+        f.pack(fill="x", pady=3)
+        self.source_mode = tk.StringVar(value="webcam")
+        self.cam_index = tk.IntVar(value=0)
+        r1 = ttk.Radiobutton(f, text="Webcam, índice:", variable=self.source_mode, value="webcam")
+        r1.grid(row=0, column=0, sticky="w")
+        sp = ttk.Spinbox(f, from_=0, to=9, width=4, textvariable=self.cam_index)
+        sp.grid(row=0, column=1, sticky="w", padx=4)
+        r2 = ttk.Radiobutton(f, text="Archivo de video", variable=self.source_mode, value="video")
+        r2.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        b = ttk.Button(f, text="Abrir…", command=self._choose_video)
+        b.grid(row=1, column=1, sticky="w", padx=4, pady=(6, 0))
+        self.video_lbl = ttk.Label(f, text="(ningún video)", style="Muted.TLabel", width=34)
+        self.video_lbl.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.config_widgets += [(r1, "normal"), (sp, "normal"), (r2, "normal"), (b, "normal")]
+
+        # --- Modelo y tracker
+        f = ttk.LabelFrame(left, text="2. Modelo y tracker (ejecución individual)",
+                           padding=(10, 6))
+        f.pack(fill="x", pady=3)
+        self.model_name = tk.StringVar(value="yolov8n.pt")
+        self.tracker_name = tk.StringVar(value="bytetrack")
+        ttk.Label(f, text="Modelo YOLO:").grid(row=0, column=0, sticky="w")
+        cb_model = ttk.Combobox(f, textvariable=self.model_name, width=18,
+                                values=self.DEFAULT_MODELS)
+        cb_model.grid(row=0, column=1, padx=4, pady=3)
+        b2 = ttk.Button(f, text="…", width=3, command=self._choose_weights)
+        b2.grid(row=0, column=2)
+        ttk.Label(f, text="Tracker:").grid(row=1, column=0, sticky="w")
+        cb_trk = ttk.Combobox(f, textvariable=self.tracker_name, width=18, state="readonly",
+                              values=["bytetrack", "botsort"])
+        cb_trk.grid(row=1, column=1, padx=4, pady=3)
+        self.config_widgets += [(cb_model, "normal"), (b2, "normal"), (cb_trk, "readonly")]
+
+        # --- Clases
+        f = ttk.LabelFrame(left, text="3. Objetos a seguir", padding=(10, 6))
+        f.pack(fill="x", pady=3)
+        self.class_vars = {}
+        for i, (name, cid) in enumerate(self.CLASSES):
+            v = tk.BooleanVar(value=(cid == 0))
+            self.class_vars[cid] = v
+            c = ttk.Checkbutton(f, text=name, variable=v)
+            c.grid(row=i // 2, column=i % 2, sticky="w", padx=4)
+            self.config_widgets.append((c, "normal"))
+        ttk.Label(f, text="(sin marcar = todas las clases)", style="Muted.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # --- Parámetros en vivo
+        f = ttk.LabelFrame(left, text="4. Parámetros", padding=(10, 6))
+        f.pack(fill="x", pady=3)
+        self.conf_lbl = ttk.Label(f, text="Confianza: 0.30")
+        self.conf_lbl.pack(anchor="w")
+        ttk.Scale(f, from_=0.05, to=0.95, value=0.30, command=self._on_conf).pack(
+            fill="x", pady=(2, 0))
+        self.trail_lbl = ttk.Label(f, text="Largo de estela: 40")
+        self.trail_lbl.pack(anchor="w", pady=(8, 0))
+        ttk.Scale(f, from_=0, to=150, value=40, command=self._on_trail).pack(
+            fill="x", pady=(2, 0))
+        self.save_video = tk.BooleanVar(value=False)
+        c = ttk.Checkbutton(f, text="Guardar video anotado (salida/resultado.mp4)",
+                            variable=self.save_video)
+        c.pack(anchor="w", pady=(8, 0))
+        self.config_widgets.append((c, "normal"))
+
+        # --- Control
+        f = ttk.LabelFrame(left, text="5. Control", padding=(10, 6))
+        f.pack(fill="x", pady=3)
+        self.btn_start = ttk.Button(f, text="▶  Iniciar", style="Accent.TButton",
+                                    command=self._start)
+        self.btn_start.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        self.pause_txt = tk.StringVar(value="⏸  Pausar")
+        self.btn_pause = ttk.Button(f, textvariable=self.pause_txt, command=self._toggle_pause,
+                                    state="disabled")
+        self.btn_pause.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
+        self.btn_stop = ttk.Button(f, text="⏹  Detener", style="Danger.TButton",
+                                   command=self._stop, state="disabled")
+        self.btn_stop.grid(row=0, column=2, sticky="ew", padx=2, pady=2)
+        self.btn_line = ttk.Button(f, text="✏  Dibujar línea", command=self._toggle_draw)
+        self.btn_line.grid(row=1, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
+        self.btn_reset = ttk.Button(f, text="↺ Reiniciar", command=self._reset_counts)
+        self.btn_reset.grid(row=1, column=2, sticky="ew", padx=2, pady=2)
+        for i in range(3):
+            f.columnconfigure(i, weight=1)
+
+        ttk.Button(left, text="Analizar trayectorias", command=self._analyze_current).pack(
+            fill="x", pady=(10, 0))
+
+        # --- Derecha: pestañas
+        self.nb = ttk.Notebook(right)
+        self.nb.pack(fill="both", expand=True)
+        tab_video = ttk.Frame(self.nb)
+        tab_an = ttk.Frame(self.nb)
+        tab_cmp = ttk.Frame(self.nb)
+        self.nb.add(tab_video, text="  Video  ")
+        self.nb.add(tab_an, text="  Análisis de trayectorias  ")
+        self.nb.add(tab_cmp, text="  Comparación de modelos  ")
+
+        # Barra de contadores (siempre visible sobre el video)
+        stats = ttk.Frame(tab_video, style="Card.TFrame", padding=(16, 8))
+        stats.pack(fill="x", pady=(8, 6))
+        self.lbl_pos = tk.StringVar(value="0")
+        self.lbl_neg = tk.StringVar(value="0")
+        for col, (cap, var, sty) in enumerate((("CRUCES HACIA (+)", self.lbl_pos, "CardPos.TLabel"),
+                                               ("CRUCES HACIA (−)", self.lbl_neg, "CardNeg.TLabel"))):
+            box = ttk.Frame(stats, style="Card.TFrame")
+            box.grid(row=0, column=col, sticky="w", padx=(0, 28))
+            ttk.Label(box, text=cap, style="CardMuted.TLabel").pack(anchor="w")
+            ttk.Label(box, textvariable=var, style=sty).pack(anchor="w")
+        info = ttk.Frame(stats, style="Card.TFrame")
+        info.grid(row=0, column=2, sticky="w")
+        self.lbl_info = ttk.Label(info, text="Total: 0 | Activos: 0 | IDs únicos: 0 | FPS: 0.0",
+                                  style="CardText.TLabel")
+        self.lbl_info.pack(anchor="w")
+        ttk.Label(info, text="(+) = lado derecho yendo de A hacia B",
+                  style="CardMuted.TLabel").pack(anchor="w")
+
+        self.canvas = tk.Canvas(tab_video, bg=self.pal["canvas"], highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda e: self._show_frame(self.last_rgb))
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+
+        self._build_analysis_tab(tab_an)
+        self._build_compare_tab(tab_cmp)
+
+    def _build_analysis_tab(self, parent):
+        bar = ttk.Frame(parent, padding=(0, 8))
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Cargar CSV…", command=self._load_csv).pack(side="left", padx=2)
+        ttk.Button(bar, text="Exportar CSV…", command=self._export_csv).pack(side="left", padx=2)
+        ttk.Button(bar, text="Exportar resumen…", command=self._export_summary).pack(
+            side="left", padx=2)
+        ttk.Button(bar, text="Guardar gráfico…", command=self._save_fig).pack(side="left", padx=2)
+
+        self.fig = Figure(figsize=(10, 4.4), dpi=100)
+        self.fig_canvas = FigureCanvasTkAgg(self.fig, master=parent)
+        self.fig_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self.stats_lbl = ttk.Label(parent, text="Sin datos todavía. Ejecuta el tracking y "
+                                   "presiona «Analizar trayectorias».", padding=(2, 6),
+                                   wraplength=1000, justify="left")
+        self.stats_lbl.pack(fill="x")
+        tf = ttk.Frame(parent)
+        tf.pack(fill="x")
+        self.tree = ttk.Treeview(tf, columns=SUMMARY_COLS, show="headings", height=7)
+        for col in SUMMARY_COLS:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=95, anchor="center")
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="x", expand=True)
+        sb.pack(side="right", fill="y")
+
+    def _build_compare_tab(self, parent):
+        cfgf = ttk.LabelFrame(parent, padding=(12, 8),
+                              text="Configuraciones a comparar (se ejecutan sobre el video de «1. Fuente»)")
+        cfgf.pack(fill="x", padx=2, pady=(8, 4))
+
+        # Fila 1: modelos
+        r1 = ttk.Frame(cfgf)
+        r1.pack(fill="x")
+        ttk.Label(r1, text="Modelos:").pack(side="left")
+        self.bench_models = {}
+        self.models_frame = ttk.Frame(r1)
+        self.models_frame.pack(side="left")
+        ttk.Button(r1, text="+ Agregar .pt…", command=self._add_model_file).pack(
+            side="left", padx=6)
+
+        # Modelos OBB en su propia fila (se entrenaron con imágenes aéreas, clases DOTA)
+        r1b = ttk.Frame(cfgf)
+        r1b.pack(fill="x", pady=(4, 0))
+        ttk.Label(r1b, text="Modelos OBB:").pack(side="left")
+        self.obb_frame = ttk.Frame(r1b)
+        self.obb_frame.pack(side="left")
+        ttk.Label(r1b, style="Muted.TLabel",
+                  text="  (clases DOTA, imágenes aéreas: solo Auto → small vehicle, "
+                       "Bus/Camión → large vehicle)").pack(side="left")
+
+        for m in STD_MODELS:
+            self._add_model_check(m, m in ("yolov8n.pt", "yolov8s.pt"))
+        for m in OBB_MODELS:
+            self._add_model_check(m, False)
+
+        # Fila 2: trackers, frames, valores reales
+        r2 = ttk.Frame(cfgf)
+        r2.pack(fill="x", pady=5)
+        ttk.Label(r2, text="Trackers:").pack(side="left")
+        self.bench_trackers = {"bytetrack": tk.BooleanVar(value=True),
+                               "botsort": tk.BooleanVar(value=True)}
+        ttk.Checkbutton(r2, text="ByteTrack", variable=self.bench_trackers["bytetrack"]).pack(
+            side="left", padx=3)
+        ttk.Checkbutton(r2, text="BoT-SORT", variable=self.bench_trackers["botsort"]).pack(
+            side="left", padx=3)
+        ttk.Label(r2, text="   Frames máx. (0 = todo el video):").pack(side="left")
+        self.max_frames = tk.IntVar(value=300)
+        ttk.Spinbox(r2, from_=0, to=1000000, increment=50, width=7,
+                    textvariable=self.max_frames).pack(side="left", padx=3)
+        ttk.Label(r2, text="   Cruces reales (opc.):").pack(side="left")
+        self.gt_cross = tk.StringVar()
+        e1 = ttk.Entry(r2, width=6, textvariable=self.gt_cross)
+        e1.pack(side="left", padx=3)
+        ttk.Label(r2, text="Objetos reales (opc.):").pack(side="left")
+        self.gt_objs = tk.StringVar()
+        e2 = ttk.Entry(r2, width=6, textvariable=self.gt_objs)
+        e2.pack(side="left", padx=3)
+        for e in (e1, e2):
+            e.bind("<FocusOut>", lambda ev: self._refresh_comparison())
+            e.bind("<Return>", lambda ev: self._refresh_comparison())
+
+        # Fila 3: pesos del puntaje
+        r3 = ttk.Frame(cfgf)
+        r3.pack(fill="x", pady=2)
+        ttk.Label(r3, text="Pesos del puntaje →").pack(side="left")
+        self.w_vars = {"prec": tk.DoubleVar(value=40), "stab": tk.DoubleVar(value=35),
+                       "speed": tk.DoubleVar(value=25)}
+        self.w_lbls = {}
+        for key, text in (("prec", "Precisión"), ("stab", "Estabilidad"), ("speed", "Velocidad")):
+            ttk.Label(r3, text=text + ":").pack(side="left", padx=(10, 2))
+            ttk.Scale(r3, from_=0, to=100, variable=self.w_vars[key], length=110,
+                      command=lambda v, k=key: self._on_weights(k)).pack(side="left")
+            lbl = ttk.Label(r3, text=str(int(self.w_vars[key].get())), width=4)
+            lbl.pack(side="left")
+            self.w_lbls[key] = lbl
+
+        # Fila 4: botones
+        r4 = ttk.Frame(cfgf)
+        r4.pack(fill="x", pady=(6, 0))
+        self.btn_bench = ttk.Button(r4, text="▶  Ejecutar comparación", style="Accent.TButton",
+                                    command=self._start_benchmark)
+        self.btn_bench.pack(side="left", padx=2)
+        ttk.Button(r4, text="Quitar seleccionada", command=self._remove_selected_run).pack(
+            side="left", padx=2)
+        ttk.Button(r4, text="Limpiar todo", command=self._clear_runs).pack(side="left", padx=2)
+        ttk.Button(r4, text="Exportar…", command=self._export_comparison).pack(side="left", padx=2)
+        self.auto_accumulate = tk.BooleanVar(value=True)
+        ttk.Checkbutton(r4, text="Sumar a la comparación cada ejecución individual",
+                        variable=self.auto_accumulate).pack(side="left", padx=12)
+
+        # Tabla
+        tf = ttk.Frame(parent)
+        tf.pack(fill="x", padx=2)
+        self.cmp_tree = ttk.Treeview(tf, columns=[c[0] for c in COMP_COLS], show="headings",
+                                     height=6)
+        for key, title, wd in COMP_COLS:
+            self.cmp_tree.heading(key, text=title)
+            self.cmp_tree.column(key, width=wd, anchor="w" if key == "run" else "center",
+                                 stretch=False)
+        vs = ttk.Scrollbar(tf, orient="vertical", command=self.cmp_tree.yview)
+        hs = ttk.Scrollbar(tf, orient="horizontal", command=self.cmp_tree.xview)
+        self.cmp_tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        self.cmp_tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        tf.columnconfigure(0, weight=1)
+
+        self.cmp_info = ttk.Label(parent, text="", wraplength=1000, justify="left",
+                                  padding=(2, 6))
+        self.cmp_info.pack(fill="x", padx=2)
+
+        # Gráficos
+        self.cmp_nb = ttk.Notebook(parent)
+        self.cmp_nb.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+        t1, t2 = ttk.Frame(self.cmp_nb), ttk.Frame(self.cmp_nb)
+        self.cmp_nb.add(t1, text="  Métricas  ")
+        self.cmp_nb.add(t2, text="  Trayectorias lado a lado  ")
+        self.fig_cmp = Figure(figsize=(10, 4.2), dpi=100)
+        self.cv_cmp = FigureCanvasTkAgg(self.fig_cmp, master=t1)
+        self.cv_cmp.get_tk_widget().pack(fill="both", expand=True)
+        self.fig_trj = Figure(figsize=(10, 4.2), dpi=100)
+        self.cv_trj = FigureCanvasTkAgg(self.fig_trj, master=t2)
+        self.cv_trj.get_tk_widget().pack(fill="both", expand=True)
+
+    # ------------------------------------------------------- Tema
+    def _walk(self, w):
+        yield w
+        for c in w.winfo_children():
+            yield from self._walk(c)
+
+    def _style_extras(self):
+        """Ajustes de tema que no se pueden hacer solo con estilos ttk."""
+        p = self.pal
+        # Filas alternas en las tablas
+        for t in (self.tree, self.cmp_tree):
+            t.tag_configure("odd", background=p["row_alt"])
+        # Fondo de los lienzos de matplotlib
+        for cv in (self.fig_canvas, self.cv_cmp, self.cv_trj):
+            cv.get_tk_widget().configure(bg=p["bg"])
+        # Lista desplegable de los Combobox (no la controla ttk)
+        for w in self._walk(self):
+            if isinstance(w, ttk.Combobox):
+                try:
+                    pop = self.tk.call("ttk::combobox::PopdownWindow", str(w))
+                    self.tk.call(f"{pop}.f.l", "configure",
+                                 "-background", p["field"], "-foreground", p["fg"],
+                                 "-selectbackground", p["accent"],
+                                 "-selectforeground", p["accent_fg"],
+                                 "-borderwidth", 0, "-highlightthickness", 0)
+                except tk.TclError:
+                    pass
+
+    def _toggle_theme(self):
+        self.theme_name = "light" if self.theme_name == "dark" else "dark"
+        self.pal = apply_theme(self, self.theme_name)
+        self.btn_theme.config(
+            text="☀  Modo claro" if self.theme_name == "dark" else "☾  Modo oscuro")
+        self.canvas.configure(bg=self.pal["canvas"])
+        for fig in (self.fig, self.fig_cmp, self.fig_trj):
+            fig.patch.set_facecolor(self.pal["bg"])
+        if self.last_df is not None:
+            draw_analysis(self.fig, self.last_df, self.last_summary, self.last_bg)
+        self.fig_canvas.draw()
+        self._refresh_comparison()
+        self._style_extras()
+
+    # ------------------------------------------------------- Eventos de UI
+    def _on_conf(self, v):
+        self.conf = float(v)
+        self.conf_lbl.config(text=f"Confianza: {self.conf:.2f}")
+
+    def _on_trail(self, v):
+        self.trail_len = int(float(v))
+        self.trail_lbl.config(text=f"Largo de estela: {self.trail_len}")
+
+    def _choose_video(self):
+        p = filedialog.askopenfilename(
+            title="Selecciona un video",
+            filetypes=[("Videos", "*.mp4 *.avi *.mov *.mkv *.wmv"), ("Todos", "*.*")])
+        if p:
+            self.video_path = p
+            self.video_lbl.config(text=os.path.basename(p), style="TLabel")
+            self.source_mode.set("video")
+
+    def _choose_weights(self):
+        p = filedialog.askopenfilename(title="Selecciona pesos YOLO (.pt)",
+                                       filetypes=[("Pesos PyTorch", "*.pt"), ("Todos", "*.*")])
+        if p:
+            self.model_name.set(p)
+
+    # ------------------------------------------------ Dibujo de la línea
+    def _toggle_draw(self):
+        self.drawing_line = not self.drawing_line
+        self.click_pts = []
+        self.btn_line.config(text="✖ Cancelar dibujo" if self.drawing_line else "✏  Dibujar línea")
+        self.nb.select(0)
+        self._redraw_overlay()
+
+    def _on_canvas_click(self, e):
+        if not self.drawing_line or not self.img_rect:
+            return
+        ox, oy, dw, dh = self.img_rect
+        fx = min(max((e.x - ox) / dw, 0.0), 1.0)
+        fy = min(max((e.y - oy) / dh, 0.0), 1.0)
+        self.click_pts.append((fx, fy))
+        if len(self.click_pts) == 2:
+            (x1, y1), (x2, y2) = self.click_pts
+            self.line_rel = [x1, y1, x2, y2]
+            self.click_pts = []
+            self.drawing_line = False
+            self.btn_line.config(text="✏  Dibujar línea")
+            self._reset_counts()
+        self._redraw_overlay()
+
+    def _reset_counts(self):
+        self.reset_event.set()
+        self.lbl_pos.set("0")
+        self.lbl_neg.set("0")
+
+    # ------------------------------------------------ Mostrar video
+    def _show_frame(self, rgb):
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 20 or ch < 20:
+            return
+        h, w = rgb.shape[:2]
+        s = min(cw / w, ch / h)
+        dw, dh = max(int(w * s), 1), max(int(h * s), 1)
+        img = Image.fromarray(rgb).resize((dw, dh), Image.BILINEAR)
+        self.photo = ImageTk.PhotoImage(img)
+        ox, oy = (cw - dw) // 2, (ch - dh) // 2
+        self.canvas.delete("img")
+        self.canvas.create_image(ox, oy, anchor="nw", image=self.photo, tags="img")
+        self.canvas.tag_lower("img")
+        self.img_rect = (ox, oy, dw, dh)
+        self._redraw_overlay()
+
+    def _redraw_overlay(self):
+        c = self.canvas
+        c.delete("ov")
+        if not self.img_rect:
+            return
+        ox, oy, dw, dh = self.img_rect
+
+        def P(fx, fy):
+            return ox + fx * dw, oy + fy * dh
+
+        x1, y1 = P(self.line_rel[0], self.line_rel[1])
+        x2, y2 = P(self.line_rel[2], self.line_rel[3])
+        c.create_line(x1, y1, x2, y2, fill="#ff3030", width=3, tags="ov")
+        for (x, y, t) in ((x1, y1, "A"), (x2, y2, "B")):
+            c.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#ffd400", outline="", tags="ov")
+            c.create_text(x + 12, y - 12, text=t, fill="#ffd400",
+                          font=(self.pal["font"], 12, "bold"), tags="ov")
+        for fx, fy in self.click_pts:
+            x, y = P(fx, fy)
+            c.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#ff40ff", outline="", tags="ov")
+        msg = None
+        if self.drawing_line:
+            msg = ("Haz clic en el punto A" if not self.click_pts
+                   else "Ahora haz clic en el punto B")
+        elif self.show_hint:
+            msg = "Elige la fuente y presiona ▶ Iniciar"
+        if msg:
+            c.create_text(ox + dw / 2, oy + 24, text=msg, fill="white",
+                          font=(self.pal["font"], 14, "bold"), tags="ov")
+
+    # ------------------------------------------------ Control del hilo
+    def _set_running(self, running):
+        for w, st in self.config_widgets:
+            w.configure(state="disabled" if running else st)
+        self.btn_start.config(state="disabled" if running else "normal")
+        self.btn_bench.config(state="disabled" if running else "normal")
+        self.btn_pause.config(state="normal" if running else "disabled")
+        self.btn_stop.config(state="normal" if running else "disabled")
+        lock_line = running and self.bench_active  # en la comparación la línea queda fija
+        self.btn_line.config(state="disabled" if lock_line else "normal")
+        self.btn_reset.config(state="disabled" if lock_line else "normal")
+        self.pause_txt.set("⏸  Pausar")
+
+    def _selected_classes(self):
+        return [cid for cid, v in self.class_vars.items() if v.get()] or None
+
+    def _start(self):
+        if self.worker is not None:
+            return
+        if self.source_mode.get() == "video":
+            if not self.video_path:
+                messagebox.showwarning("Falta el video", "Primero elige un archivo de video.")
+                return
+            source = self.video_path
+        else:
+            try:
+                source = int(self.cam_index.get())
+            except (tk.TclError, ValueError):
+                source = 0
+        cfg = {"source": source, "model": self.model_name.get().strip() or "yolov8n.pt",
+               "tracker": self.tracker_name.get(), "classes": self._selected_classes(),
+               "imgsz": DEFAULT_IMGSZ, "save_video": self.save_video.get(), "out_dir": self.out_dir,
+               "benchmark": False, "max_frames": 0, "fixed_conf": None, "line": None}
+        self.reset_event.clear()
+        self.show_hint = False
+        self.worker = Worker(self, cfg)
+        self._set_running(True)
+        self.nb.select(0)
+        self.worker.start()
+
+    def _toggle_pause(self):
+        w = self.worker
+        if not w:
+            return
+        if w.pause_ev.is_set():
+            w.pause_ev.clear()
+            self.pause_txt.set("⏸  Pausar")
+        else:
+            w.pause_ev.set()
+            self.pause_txt.set("▶  Continuar")
+            self.status.set("En pausa.")
+
+    def _stop(self):
+        if self.worker:
+            if self.bench_active:  # cancelar toda la comparación
+                self.bench_queue.clear()
+                self.bench_cancelled = True
+            self.worker.stop_ev.set()
+            self.worker.pause_ev.clear()
+
+    # ------------------------------------------------ Bucle de la GUI
+    def _poll(self):
+        with self.lock:
+            fr, self.latest_frame = self.latest_frame, None
+        if fr is not None:
+            self.last_rgb = fr
+            self._show_frame(fr)
+
+        w = self.worker
+        if w is not None:
+            self.lbl_pos.set(str(w.counts_pos))
+            self.lbl_neg.set(str(w.counts_neg))
+            self.lbl_info.config(
+                text=f"Total: {w.counts_pos + w.counts_neg} | Activos: {w.active} | "
+                     f"IDs únicos: {len(w.unique_ids)} | FPS: {w.fps:.1f}")
+            tot = w.total_frames
+            self.progress.configure(value=(100.0 * w.frame_idx / tot) if tot > 0 else 0)
+            if w.frame_idx > 0 and not w.pause_ev.is_set():
+                pre = (f"Comparación {self.bench_done + 1}/{self.bench_total} · "
+                       if self.bench_active else "")
+                name = f"{os.path.basename(w.cfg['model'])} + {w.cfg['tracker']}"
+                prog = f"frame {w.frame_idx}/{tot}" if tot else f"frame {w.frame_idx}"
+                self.status.set(f"{pre}{name} · {prog} · {w.fps:.1f} FPS")
+
+        while True:
+            try:
+                kind, data = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "status":
+                self.status.set(data)
+            elif kind == "error":
+                if self.bench_active and self.worker is not None:
+                    c = self.worker.cfg
+                    self.bench_errors.append(f"{c['model']} + {c['tracker']}: {data}")
+                else:
+                    self.status.set("Error: " + data)
+                    messagebox.showerror("Error", data)
+            elif kind == "finished":
+                self._on_finished()
+        self.after(15, self._poll)
+
+    def _on_finished(self):
+        w = self.worker
+        self.worker = None
+        self._set_running(False)
+        self.progress.configure(value=0)
+        if w is None:
+            return
+        was_bench = bool(w.cfg.get("benchmark"))
+
+        if was_bench and self.bench_cancelled:
+            self.bench_active = self.bench_cancelled = False
+            self.status.set("Comparación cancelada (la ejecución en curso se descartó; "
+                            "las ya terminadas se conservan).")
+            return
+
+        self.records, self.bg_frame = list(w.records), w.bg_frame
+
+        run = None
+        if self.records and (was_bench or self.auto_accumulate.get()):
+            run = self._make_run(w)
+            if run:
+                self.runs.append(run)
+                self._persist_run(run)
+
+        if was_bench:
+            if not self.records and w.error is None:
+                c = w.cfg
+                self.bench_errors.append(
+                    f"{os.path.basename(c['model'])} + {c['tracker']}: no detectó ningún objeto "
+                    "con las clases y la confianza elegidas (se omitió de la comparación).")
+            self.bench_done += 1
+            if self.bench_queue:
+                self._start_next_bench()
+                return
+            self.bench_active = False
+            self._refresh_comparison(save=True)
+            self.nb.select(2)
+            self.status.set(f"Comparación terminada: {len(self.runs)} ejecuciones acumuladas. "
+                            f"Resultados en {os.path.join(self.out_dir, 'comparacion')}")
+            if self.bench_errors:
+                messagebox.showwarning("Algunas configuraciones fallaron",
+                                       "\n\n".join(self.bench_errors))
+            return
+
+        total = w.counts_pos + w.counts_neg
+        msg = (f"Finalizado · cruces (+): {w.counts_pos} | (−): {w.counts_neg} | "
+               f"total: {total} | IDs únicos: {len(w.unique_ids)}")
+        if self.records:
+            os.makedirs(self.out_dir, exist_ok=True)
+            df = pd.DataFrame(self.records, columns=CSV_COLUMNS)
+            df.to_csv(os.path.join(self.out_dir, "trayectorias.csv"), index=False)
+            if self.bg_frame is not None:
+                cv2.imwrite(os.path.join(self.out_dir, "fondo.jpg"), self.bg_frame)
+            msg += f" · {len(df)} puntos guardados en {self.out_dir}"
+            if run:
+                msg += " · sumada a la comparación"
+                self._refresh_comparison(save=True)
+            self.status.set(msg)
+            self._show_analysis(df, self.bg_frame)
+        else:
+            self.status.set(msg + " · no se detectaron objetos")
+
+    # ------------------------------------------------ Análisis (una ejecución)
+    def _analyze_current(self):
+        recs = list(self.worker.records) if self.worker else self.records
+        if not recs:
+            messagebox.showinfo("Sin datos", "Aún no hay trayectorias. Ejecuta el tracking primero.")
+            return
+        bg = self.worker.bg_frame if self.worker else self.bg_frame
+        self._show_analysis(pd.DataFrame(recs, columns=CSV_COLUMNS), bg)
+
+    def _show_analysis(self, df, bg):
+        if df.empty:
+            messagebox.showinfo("Sin datos", "El CSV no contiene trayectorias.")
+            return
+        summary = compute_summary(df)
+        self.last_df, self.last_bg, self.last_summary = df, bg, summary
+        draw_analysis(self.fig, df, summary, bg)
+        self.fig_canvas.draw()
+
+        self.tree.delete(*self.tree.get_children())
+        for i, (_, r) in enumerate(summary.iterrows()):
+            self.tree.insert("", "end", values=[r[c] for c in SUMMARY_COLS],
+                             tags=("odd",) if i % 2 else ())
+        if summary.empty:
+            txt = (f"IDs únicos: {df['id'].nunique()} · ninguna trayectoria con "
+                   f"≥ {MIN_POINTS} puntos.")
+        else:
+            txt = (f"IDs únicos: {df['id'].nunique()} · analizados (≥{MIN_POINTS} pts): "
+                   f"{len(summary)} · duración media: {summary['duracion_s'].mean():.2f} s · "
+                   f"distancia media: {summary['distancia_px'].mean():.0f} px · "
+                   f"velocidad media: {summary['velocidad_px_s'].mean():.0f} px/s · "
+                   f"rectitud media: {summary['rectitud'].mean():.2f}")
+        self.stats_lbl.config(text=txt)
+        self.nb.select(1)
+
+    def _load_csv(self):
+        p = filedialog.askopenfilename(title="Cargar trayectorias",
+                                       filetypes=[("CSV", "*.csv"), ("Todos", "*.*")])
+        if not p:
+            return
+        try:
+            df = pd.read_csv(p)
+            missing = set(CSV_COLUMNS) - set(df.columns)
+            if missing:
+                raise ValueError(f"Faltan columnas: {', '.join(sorted(missing))}")
+        except Exception as e:
+            messagebox.showerror("CSV inválido", str(e))
+            return
+        bgp = os.path.join(os.path.dirname(p), "fondo.jpg")
+        bg = cv2.imread(bgp) if os.path.exists(bgp) else None
+        self._show_analysis(df, bg)
+
+    def _export_csv(self):
+        if self.last_df is None:
+            messagebox.showinfo("Sin datos", "No hay trayectorias para exportar.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="trayectorias.csv",
+                                         filetypes=[("CSV", "*.csv")])
+        if p:
+            self.last_df.to_csv(p, index=False)
+            self.status.set(f"Trayectorias exportadas a {p}")
+
+    def _export_summary(self):
+        if self.last_df is None:
+            messagebox.showinfo("Sin datos", "No hay resumen para exportar.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".csv",
+                                         initialfile="resumen_trayectorias.csv",
+                                         filetypes=[("CSV", "*.csv")])
+        if p:
+            self.last_summary.to_csv(p, index=False)
+            self.status.set(f"Resumen exportado a {p}")
+
+    def _save_fig(self):
+        if self.last_df is None:
+            messagebox.showinfo("Sin datos", "No hay gráfico para guardar.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".png",
+                                         initialfile="analisis_trayectorias.png",
+                                         filetypes=[("PNG", "*.png")])
+        if p:
+            self.fig.savefig(p, dpi=130)
+            self.status.set(f"Gráfico guardado en {p}")
+
+    # ------------------------------------------------ Comparación: configuración
+    def _add_model_check(self, name, checked=True):
+        if name in self.bench_models:
+            self.bench_models[name].set(True)
+            return
+        v = tk.BooleanVar(value=checked)
+        self.bench_models[name] = v
+        parent = self.obb_frame if "obb" in os.path.basename(name).lower() else self.models_frame
+        ttk.Checkbutton(parent, text=os.path.basename(name), variable=v).pack(
+            side="left", padx=3)
+
+    def _add_model_file(self):
+        p = filedialog.askopenfilename(title="Selecciona pesos YOLO (.pt)",
+                                       filetypes=[("Pesos PyTorch", "*.pt"), ("Todos", "*.*")])
+        if p:
+            self._add_model_check(p, True)
+
+    def _on_weights(self, key):
+        self.w_lbls[key].config(text=str(int(self.w_vars[key].get())))
+        if self._wjob:
+            self.after_cancel(self._wjob)
+        self._wjob = self.after(250, lambda: self._refresh_comparison(save=False))
+
+    def _start_benchmark(self):
+        if self.worker is not None:
+            return
+        if not self.video_path:
+            messagebox.showwarning(
+                "Falta el video",
+                "La comparación necesita un video (todas las configuraciones deben procesar "
+                "exactamente lo mismo).\n\nEn «1. Fuente» elige «Archivo de video» y presiona «Abrir…».")
+            return
+        models = [m for m, v in self.bench_models.items() if v.get()]
+        trackers = [t for t, v in self.bench_trackers.items() if v.get()]
+        if not models or not trackers:
+            messagebox.showwarning("Faltan opciones", "Marca al menos un modelo y un tracker.")
+            return
+        cls = self._selected_classes()
+        has_obb = any("obb" in os.path.basename(m).lower() for m in models)
+        if has_obb and cls is not None and not any(c in COCO_TO_OBB_NAMES for c in cls):
+            if not messagebox.askyesno(
+                    "Clases sin equivalente en los modelos OBB",
+                    "Los modelos OBB solo reconocen clases aéreas (DOTA). Con las clases marcadas "
+                    "(Persona, Bicicleta o Moto) no tienen equivalente y esas configuraciones "
+                    "se omitirán.\n\nMarca Auto, Bus o Camión para incluirlos.\n\n¿Continuar de todos modos?"):
+                return
+        try:
+            max_frames = max(int(self.max_frames.get()), 0)
+        except (tk.TclError, ValueError):
+            max_frames = 0
+        self.bench_queue = deque((m, t) for m in models for t in trackers)
+        self.bench_total = len(self.bench_queue)
+        self.bench_done = 0
+        self.bench_errors = []
+        self.bench_cancelled = False
+        self.bench_active = True
+        # Condiciones congeladas: todas las configuraciones usan exactamente lo mismo
+        self.bench_params = {"source": self.video_path, "conf": self.conf,
+                             "classes": self._selected_classes(),
+                             "line": list(self.line_rel), "max_frames": max_frames}
+        self.nb.select(0)
+        self._start_next_bench()
+
+    def _start_next_bench(self):
+        model, tracker = self.bench_queue.popleft()
+        p = self.bench_params
+        cfg = {"source": p["source"], "model": model, "tracker": tracker,
+               "classes": p["classes"], "imgsz": DEFAULT_IMGSZ, "save_video": False,
+               "out_dir": self.out_dir, "benchmark": True, "max_frames": p["max_frames"],
+               "fixed_conf": p["conf"], "line": p["line"]}
+        self.reset_event.clear()
+        self.show_hint = False
+        self.worker = Worker(self, cfg)
+        self._set_running(True)
+        self.worker.start()
+
+    # ------------------------------------------------ Comparación: datos acumulados
+    def _unique_label(self, base):
+        n = sum(1 for r in self.runs if r["label"] == base or r["label"].startswith(base + " ("))
+        return base if n == 0 else f"{base} ({n + 1})"
+
+    def _make_run(self, w):
+        if w.perf is None or not w.records:
+            return None
+        df = pd.DataFrame(w.records, columns=CSV_COLUMNS)
+        summary = compute_summary(df)
+        metrics = compute_run_metrics(df, summary, w.perf, w.counts_pos, w.counts_neg)
+        src = w.cfg["source"]
+        self.run_counter += 1
+        model, tracker = w.cfg["model"], w.cfg["tracker"]
+        return {
+            "id": self.run_counter,
+            "label": self._unique_label(f"{os.path.basename(model)} + {tracker}"),
+            "model": os.path.basename(model), "tracker": tracker,
+            "source": f"webcam {src}" if isinstance(src, int) else os.path.basename(src),
+            "conf": round(float(w.conf_used), 2),
+            "classes": tuple(w.cfg["classes"]) if w.cfg["classes"] else (),
+            "line": tuple(round(float(v), 2) for v in w.line_used),
+            "df": df, "summary": summary, "bg": w.bg_frame,
+            "metrics": metrics, "device": w.perf["device"],
+        }
+
+    def _persist_run(self, run):
+        d = os.path.join(self.out_dir, "comparacion",
+                         f"{run['id']:02d}_{safe_name(run['label'])}")
+        os.makedirs(d, exist_ok=True)
+        run["df"].to_csv(os.path.join(d, "trayectorias.csv"), index=False)
+        run["summary"].to_csv(os.path.join(d, "resumen_trayectorias.csv"), index=False)
+
+    def _remove_selected_run(self):
+        sel = {int(i) for i in self.cmp_tree.selection()}
+        if not sel:
+            messagebox.showinfo("Selecciona una fila", "Selecciona en la tabla la ejecución a quitar.")
+            return
+        self.runs = [r for r in self.runs if r["id"] not in sel]
+        self._refresh_comparison(save=True)
+
+    def _clear_runs(self):
+        if self.runs and messagebox.askyesno("Limpiar comparación",
+                                             "¿Quitar todas las ejecuciones acumuladas?"):
+            self.runs = []
+            self._refresh_comparison(save=False)
+
+    @staticmethod
+    def _parse_gt(var):
+        s = var.get().strip().replace(",", ".")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def _conditions_text(self):
+        if len(self.runs) < 2:
+            return ""
+        keys = {"source": "el video", "conf": "la confianza", "classes": "las clases",
+                "line": "la línea"}
+        diff = [name for k, name in keys.items() if len({r[k] for r in self.runs}) > 1]
+        if diff:
+            return ("ATENCIÓN: las ejecuciones no comparten " + ", ".join(diff) +
+                    "; la comparación puede no ser justa. ")
+        return ""
+
+    def _info_text(self, rows, gt_c, gt_o):
+        if not rows:
+            return ("Marca modelos y trackers, elige un video en «1. Fuente» y presiona "
+                    "«Ejecutar comparación». Cada ejecución se acumula aquí.")
+        best = rows[0]
+        fast = max(rows, key=lambda d: d["run"]["metrics"]["fps"])
+        stab = max(rows, key=lambda d: d["stab"])
+        t = (f"Mejor puntaje: {best['run']['label']} ({best['score']:.1f}) · "
+             f"Más rápido: {fast['run']['label']} ({fast['run']['metrics']['fps']:.1f} FPS) · "
+             f"Más estable: {stab['run']['label']} ({stab['stab']:.2f}).  ")
+        if gt_c is None and gt_o is None:
+            t += ("Sin valores reales, el puntaje solo mide estabilidad y velocidad "
+                  "(no se puede evaluar la precisión). ")
+        t += self._conditions_text()
+        devices = ", ".join(sorted({r["device"] for r in self.runs}))
+        t += (f"Dispositivo: {devices}. FPS y ms/frame excluyen el primer frame "
+              "(calentamiento); «Tiempo» es el total de procesamiento.")
+        return t
+
+    def _refresh_comparison(self, save=False):
+        gt_c, gt_o = self._parse_gt(self.gt_cross), self._parse_gt(self.gt_objs)
+        rows = compute_scores(self.runs, self.w_vars["prec"].get(), self.w_vars["stab"].get(),
+                              self.w_vars["speed"].get(), gt_c, gt_o)
+        self.cmp_rows = rows
+
+        self.cmp_tree.delete(*self.cmp_tree.get_children())
+        for i, d in enumerate(rows):
+            r, m = d["run"], d["run"]["metrics"]
+            vals = [r["label"], m["frames"], f"{m['tiempo_s']:.1f}", f"{m['ms_frame']:.1f}",
+                    f"{m['fps']:.1f}", f"{m['x_rt']:.2f}", m["cruces_total"],
+                    "—" if d["err_c"] is None else f"{d['err_c']:g}", m["ids_unicos"],
+                    "—" if d["err_i"] is None else f"{d['err_i']:g}",
+                    f"{m['dur_media_s']:.2f}", f"{m['pct_cortos'] * 100:.0f}%",
+                    f"{m['continuidad']:.3f}", f"{d['score']:.1f}", d["rank"]]
+            self.cmp_tree.insert("", "end", iid=str(r["id"]), values=vals,
+                                 tags=("odd",) if i % 2 else ())
+
+        self.cmp_info.config(text=self._info_text(rows, gt_c, gt_o))
+        draw_comparison(self.fig_cmp, rows, gt_c, gt_o)
+        draw_traj_grid(self.fig_trj, rows)
+        self.cv_cmp.draw()
+        self.cv_trj.draw()
+
+        if save and rows:
+            d = os.path.join(self.out_dir, "comparacion")
+            os.makedirs(d, exist_ok=True)
+            rows_to_df(rows).to_csv(os.path.join(d, "comparacion_metricas.csv"), index=False)
+
+    def _export_comparison(self):
+        if not self.cmp_rows:
+            messagebox.showinfo("Sin datos", "Aún no hay ejecuciones para exportar.")
+            return
+        d = filedialog.askdirectory(title="Carpeta donde exportar la comparación")
+        if not d:
+            return
+        rows_to_df(self.cmp_rows).to_csv(os.path.join(d, "comparacion_metricas.csv"), index=False)
+        for r in self.runs:
+            name = f"{r['id']:02d}_{safe_name(r['label'])}"
+            r["df"].to_csv(os.path.join(d, f"trayectorias_{name}.csv"), index=False)
+        self.fig_cmp.savefig(os.path.join(d, "comparacion_metricas.png"), dpi=130)
+        self.fig_trj.savefig(os.path.join(d, "comparacion_trayectorias.png"), dpi=130)
+        self.status.set(f"Comparación exportada en {d}")
+
+    # ------------------------------------------------ Cierre
+    def _on_close(self):
+        if self.worker:
+            self.bench_queue.clear()
+            self.worker.stop_ev.set()
+            self.worker.pause_ev.clear()
+        self.destroy()
+
+
+if __name__ == "__main__":
+    App().mainloop()
