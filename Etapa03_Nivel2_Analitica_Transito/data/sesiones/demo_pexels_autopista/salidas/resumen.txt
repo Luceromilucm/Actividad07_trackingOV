@@ -1,0 +1,21 @@
+================================================================
+  ANALÍTICA DE TRÁNSITO
+================================================================
+  Sesión:      demo_pexels_autopista  (20/11/2026 08:15)
+  Duración:    1.0 min
+  Tracks:      152 en el CSV -> 38 vehículos válidos (98 cortos y 16 quietos descartados)
+  Pico:        08:15:00 con 11 vehículos (por intervalo de 10 s)
+  Hora pico:   08:00–09:00 con 38 vehículos  (la sesión no cubre la hora completa)
+  Carriles (detección automática):
+     Carril 1           19  (50.0%)  <- más usado
+     Carril 2           19  (50.0%)
+  Clases:      Auto 35, Camión 2, Moto 1
+  Línea:       Hacia la derecha: 27 | Hacia la izquierda: 0
+  Velocidad:   promedio 111.1 km/h, máxima 137.6 km/h, 14 vehículos sobre el límite
+  Movimiento:  El movimiento más frecuente fue de norte (arriba) a sur (abajo): 15 vehículos, el 40%
+  Anomalías:   trayectoria atípica 1
+----------------------------------------------------------------
+  >> El carril más utilizado fue Carril 1 (19 vehículos, 50%).
+----------------------------------------------------------------
+  Salidas en: E:\DecimoSemestre\VisionArtificial\odometria\nivel2_analitica\data\sesiones\demo_pexels_autopista\salidas
+  Reporte:     E:\DecimoSemestre\VisionArtificial\odometria\nivel2_analitica\data\sesiones\demo_pexels_autopista\salidas\reporte.html

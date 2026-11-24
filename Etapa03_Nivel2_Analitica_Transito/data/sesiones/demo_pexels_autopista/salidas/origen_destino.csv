@@ -1,0 +1,5 @@
+origen/destino,Norte,Sur,Este,Oeste
+Norte,0,15,10,0
+Sur,0,0,0,0
+Este,0,0,0,0
+Oeste,0,9,4,0

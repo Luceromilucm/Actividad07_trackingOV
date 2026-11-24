@@ -1,0 +1,210 @@
+{
+  "carpeta": "data\\sesiones\\demo_pexels_autopista",
+  "fuente": "pexels_854671_highway.mp4",
+  "inicio": "2026-11-20T08:15:00",
+  "duracion_s": 60.0,
+  "total_vehiculos": 38,
+  "limpieza": {
+    "tracks_totales": 152,
+    "descartados_cortos": 98,
+    "descartados_quietos": 16,
+    "tracks_validos": 38,
+    "detecciones_en_borde": 676,
+    "min_frames": 8,
+    "min_desplazamiento": 40.0
+  },
+  "intervalo": "10s",
+  "pico": {
+    "intervalo": "08:15:00",
+    "hasta": "08:15:10",
+    "vehiculos": 11
+  },
+  "por_intervalo": [
+    {
+      "intervalo": "08:15:00",
+      "vehiculos": 11,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:15:10",
+      "vehiculos": 3,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:15:20",
+      "vehiculos": 6,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:15:30",
+      "vehiculos": 7,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:15:40",
+      "vehiculos": 5,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:15:50",
+      "vehiculos": 6,
+      "parcial": false
+    },
+    {
+      "intervalo": "08:16:00",
+      "vehiculos": 0,
+      "parcial": true
+    }
+  ],
+  "por_hora": [
+    {
+      "intervalo": "08:00–09:00",
+      "vehiculos": 38,
+      "parcial": true
+    }
+  ],
+  "hora_pico": {
+    "intervalo": "08:00–09:00",
+    "vehiculos": 38
+  },
+  "carriles_origen": "automaticos",
+  "carril_mas_usado": {
+    "carril": "Carril 1",
+    "vehiculos": 19,
+    "porcentaje": 50.0
+  },
+  "frase_carril": "El carril más utilizado fue Carril 1 (19 vehículos, 50%)",
+  "por_carril": [
+    {
+      "carril": "Carril 1",
+      "vehiculos": 19,
+      "porcentaje": 50.0
+    },
+    {
+      "carril": "Carril 2",
+      "vehiculos": 19,
+      "porcentaje": 50.0
+    }
+  ],
+  "por_clase": {
+    "Auto": 35,
+    "Camión": 2,
+    "Moto": 1
+  },
+  "linea_conteo": {
+    "origen": "automática",
+    "linea": [
+      [
+        726.45,
+        327.29535999999996
+      ],
+      [
+        726.45,
+        714.9206399999999
+      ]
+    ],
+    "totales": {
+      "Hacia la derecha": 27,
+      "Hacia la izquierda": 0
+    },
+    "flujo_por_minuto": {
+      "Hacia la derecha": 26.98,
+      "Hacia la izquierda": 0.0
+    }
+  },
+  "velocidades": {
+    "promedio_kmh": 111.1,
+    "maxima_kmh": 137.6,
+    "excesos": 14
+  },
+  "limite_kmh": 112.0,
+  "origen_destino": {
+    "pares": [
+      {
+        "origen": "Norte",
+        "destino": "Sur",
+        "vehiculos": 15,
+        "porcentaje": 39.5
+      },
+      {
+        "origen": "Norte",
+        "destino": "Este",
+        "vehiculos": 10,
+        "porcentaje": 26.3
+      },
+      {
+        "origen": "Oeste",
+        "destino": "Sur",
+        "vehiculos": 9,
+        "porcentaje": 23.7
+      },
+      {
+        "origen": "Oeste",
+        "destino": "Este",
+        "vehiculos": 4,
+        "porcentaje": 10.5
+      }
+    ],
+    "principal": {
+      "origen": "Norte",
+      "destino": "Sur",
+      "vehiculos": 15,
+      "porcentaje": 39.5
+    },
+    "frase": "El movimiento más frecuente fue de norte (arriba) a sur (abajo): 15 vehículos, el 40%"
+  },
+  "anomalias": {
+    "conteo": {
+      "Detenido": 0,
+      "Estacionado": 0,
+      "Sentido contrario": 0,
+      "Trayectoria atípica": 1
+    },
+    "min_detenido_s": 10.0,
+    "n_patrones": 1,
+    "fijos_fuera_de_la_via": 1,
+    "casos": [
+      {
+        "track_id": 249,
+        "tipo": "Trayectoria atípica",
+        "t": 43.0,
+        "t_fin": 44.5,
+        "x": 1471.8,
+        "y": 481.5,
+        "detalle": "se aparta 6× más que una trayectoria típica"
+      }
+    ]
+  },
+  "parametros": {
+    "intervalo": "auto",
+    "por_deteccion": false,
+    "min_frames": 8,
+    "min_desplazamiento": 40.0,
+    "min_detenido_s": 10.0
+  },
+  "fecha_analisis": "2026-11-20T14:07:47",
+  "archivos": [
+    "barras_por_intervalo.png",
+    "mapa_calor.png",
+    "carriles.png",
+    "clases_por_intervalo.png",
+    "trayectorias.png",
+    "conteo_linea.png",
+    "origen_destino.png",
+    "anomalias.png",
+    "mapa_calor_animado.gif",
+    "barras_por_hora.png",
+    "reporte.html"
+  ],
+  "conclusiones": [
+    "En 1 min de video se contaron 38 vehículos únicos (unos 38.0 por minuto).",
+    "El intervalo de mayor flujo fue de 08:15:00 a 08:15:10, con 11 vehículos, 2.0 veces el promedio por 10 segundos.",
+    "Carril 1 concentró el 50% del tráfico (de 2 carriles detectados automáticamente).",
+    "Predominan los vehículos de tipo auto (92%); los pesados (camiones y buses) son el 5%.",
+    "De los 27 vehículos que cruzaron la línea de conteo, el 100% lo hizo hacia la derecha.",
+    "La velocidad promedio por vehículo fue 111.1 km/h y la máxima 137.6 km/h; 14 vehículos (37%) superaron el límite de 112 km/h.",
+    "El movimiento más frecuente fue de norte (arriba) a sur (abajo): 15 vehículos, el 40%.",
+    "Se detectaron anomalías: 1 con trayectoria atípica.",
+    "Antes de analizar se descartaron 98 tracks demasiado cortos y 16 que no se movían (posibles errores del tracker o vehículos estacionados)."
+  ]
+}
