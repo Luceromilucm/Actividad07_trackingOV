@@ -17,13 +17,13 @@ El trabajo se organiza en tres etapas. Cada parte práctica tiene su propia carp
 
 | Etapa | Parte | Carpeta |
 |---|---|---|
-| 01. Conceptos | Simulación de odometría visual con KLT (Pregunta 6) | `Etapa01_P6_Simulacion_KLT/` |
-| 02. Aplicaciones | Ítem a: odometría visual frente a tracking 2D | `Etapa02_ItemA_OV_vs_Tracking2D/` |
+| 01. Conceptos | Simulación de odometría visual con KLT (Pregunta 6) | [`Etapa01_P6_Simulacion_KLT/`](Etapa01_P6_Simulacion_KLT/) |
+| 02. Aplicaciones | Ítem a: odometría visual frente a tracking 2D | [`Etapa02_ItemA_OV_vs_Tracking2D/`](Etapa02_ItemA_OV_vs_Tracking2D/) |
 | 02. Aplicaciones | Ítem b: tracking 2D con YOLO + ByteTrack, conteo y trayectorias | `Etapa02_ItemB_Tracking2D_YOLO/` |
 | 02. Aplicaciones | Ítem c: velocidad de los objetos y mapas de calor | `Etapa02_ItemC_Velocidad_MapaCalor/` |
 | 02. Aplicaciones | Ítem d: tracking con cámara en movimiento mediante odometría visual | [`Etapa02_ItemD_Tracking_CamaraMovil_OV/`](Etapa02_ItemD_Tracking_CamaraMovil_OV/) |
 | 03. Proyecto integrador | Nivel 1: radar de velocidad con cámara fija | [`Etapa03_Nivel1_Radar_Velocidad/`](Etapa03_Nivel1_Radar_Velocidad/) |
-| 03. Proyecto integrador | Nivel 2: analítica de tránsito | `Etapa03_Nivel2_Analitica_Transito/` |
+| 03. Proyecto integrador | Nivel 2: analítica de tránsito | [`Etapa03_Nivel2_Analitica_Transito/`](Etapa03_Nivel2_Analitica_Transito/) |
 | 03. Proyecto integrador | Nivel 3: radar de velocidad con cámara en movimiento | `Etapa03_Nivel3_Radar_CamaraMovil/` |
 
 Las carpetas sin enlace se incorporarán a medida que se suba cada parte. Se mantiene la convención de nombres `EtapaXX_<parte>_<tema>/`.
