@@ -1,0 +1,15 @@
+﻿id,clase,vel,vel_max,limite,infraccion,sentido,t,hora,foto
+4,auto,46.2,46.2,46.0,True,↓,0.03,14:52:30,resultados\20261120_145204_puente_uherske\infracciones\20261120_145212_id4_auto.jpg
+3,auto,47.9,48.4,46.0,True,↑,0.03,14:52:40,resultados\20261120_145204_puente_uherske\infracciones\20261120_145212_id3_auto.jpg
+65,auto,36.4,36.4,46.0,False,↓,7.69,14:54:03,
+64,auto,33.2,36.1,46.0,False,↓,7.45,14:54:13,
+46,auto,38.1,38.6,46.0,False,↓,4.98,14:54:15,
+68,auto,33.7,35.5,46.0,False,↓,9.49,14:54:44,
+80,auto,28.5,33.1,46.0,False,↓,14.17,14:55:40,
+74,auto,38.2,39.0,46.0,False,↓,11.56,14:55:51,
+87,auto,58.2,58.4,46.0,True,↓,18.38,14:56:12,resultados\20261120_145204_puente_uherske\infracciones\20261120_145545_id87_auto.jpg
+92,camion,24.2,24.6,46.0,False,↓,20.42,14:56:40,
+73,auto,29.9,36.2,46.0,False,↓,11.49,14:56:41,
+78,camion,48.5,62.6,46.0,True,↑,13.9,14:56:43,resultados\20261120_145204_puente_uherske\infracciones\20261120_145528_id78_camion.jpg
+83,auto,46.8,52.0,46.0,True,↑,16.97,14:57:00,resultados\20261120_145204_puente_uherske\infracciones\20261120_145556_id83_auto.jpg
+97,camion,30.2,39.5,46.0,False,↓,22.19,14:57:15,

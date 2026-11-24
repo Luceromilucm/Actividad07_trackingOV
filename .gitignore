@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pt
+*.mp4
+*.avi
+*.mov
+!Etapa03_Nivel1_Radar_Velocidad/ejemplo/*.mp4
+calibracion_camara.json
+.venv/
