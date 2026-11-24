@@ -1,3 +1,0 @@
-# Solo para la demo con video real (el módulo del Nivel 2 no los necesita)
-ultralytics>=8.3
-lap>=0.5.12
